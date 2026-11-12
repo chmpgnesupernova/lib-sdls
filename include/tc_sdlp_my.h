@@ -4,8 +4,8 @@
 #ifndef _tc_sdlp_my_h_
 #define _tc_sdlp_my_h_
 
-#include "cfe.h"
-#include "tctf_my.h"
+//#include "cfe.h"
+#include "tf/tctf_my.h"
 // #include "crypto.h"
 
 #define TC_SDLP_MY_SUCCESS          (0)
@@ -31,8 +31,11 @@
 #define TC_SDLP_MY_SPP_HDR_LENGTH  6
 #define TC_SDLP_MY_SPP_MIN_LENGTH  7
 
-/* Checks one received TC frame and moves its Space Packet to the buffer start.
- * Returns the packet size, or a negative value if the frame is dropped. */
-int32 TC_SDLP_myExtractPacket(CFE_SB_Buffer_t *pBuf, int32 frameSize);
+/* SAT side code */
+// int32 TC_SDLP_myExtractPacket(CFE_SB_Buffer_t *pBuf, int32 frameSize);
+
+/* GROUND side code */
+int32 TC_SDLP_myInit(void);
+int32 TC_SDLP_mySendFrame(void* pPacket, size_t packetSize, void* pBuf);
 
 #endif /* _tc_sdlp_my_h_ */

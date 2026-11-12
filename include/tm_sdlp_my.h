@@ -3,8 +3,8 @@
 #ifndef _tm_sdlp_my_h_
 #define _tm_sdlp_my_h_
 
-#include "cfe.h"
-#include "tmtf_my.h"
+//#include "cfe.h"
+#include "tf/tmtf_my.h"
 // #include "crypto.h"
 
 #define TM_SDLP_MY_SUCCESS         (0)
@@ -25,14 +25,17 @@
 /* An idle packet needs a 6 byte header and at least 1 data byte. */
 #define TM_SDLP_MY_IDLE_MIN_LENGTH 7
 
-/* Builds the premade frame. Call once during application init. */
-int32 TM_SDLP_myInit(void);
+/* SAT side code */
 
+/* Builds the premade frame. Call once during application init. */
+//int32 TM_SDLP_myInit(void);
 /* Adds one packet to the frame and sends every frame that gets completed.
  * Returns a negative value on a send error; an oversized packet is dropped. */
-int32 TM_SDLP_myForwardPacket(const void *pPacket, size_t packetSize, osal_id_t sockId, const OS_SockAddr_t *pAddr);
-
+//int32 TM_SDLP_myForwardPacket(const void *pPacket, size_t packetSize, osal_id_t sockId, const OS_SockAddr_t *pAddr);
 /* Fills the current frame with idle data and sends it. An empty frame is not sent. */
-int32 TM_SDLP_mySendFrame(osal_id_t sockId, const OS_SockAddr_t *pAddr);
+//int32 TM_SDLP_mySendFrame(osal_id_t sockId, const OS_SockAddr_t *pAddr);
+
+/* GROUND side code */
+int32 TM_SDLP_myExtractPacket(void *pBuf, int32 frameSize);
 
 #endif /* _tm_sdlp_my_h_ */

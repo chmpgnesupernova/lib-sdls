@@ -2,7 +2,7 @@
 #ifndef _tmtf_my_h_
 #define _tmtf_my_h_
 
-#include "common_types.h"
+//#include "common_types.h"
 
 #define TMTF_MY_PRIHDR_LENGTH   6
 #define TMTF_MY_SEGLENGTHID_PKT 3 /* Binary 11 is required for the packet service */
@@ -15,6 +15,7 @@ typedef struct
     uint8 DataFieldStatus[2]; /* Flags and First Header Pointer */
 } TMTF_my_PriHdr_t;
 
+/*SAT side code*/
 #define TMTF_MY_WR_TF_VERSION(hdr, val) ((hdr).Id[0] = ((hdr).Id[0] & 0x3F) | (((val)&0x03) << 6))
 
 #define TMTF_MY_WR_SCID(hdr, val)                                 \
@@ -31,5 +32,9 @@ typedef struct
 #define TMTF_MY_WR_FIRSTHDRPTR(hdr, val)                                                  \
     ((hdr).DataFieldStatus[0] = ((((val) >> 8) & 0x07) | ((hdr).DataFieldStatus[0] & 0xF8))), \
         ((hdr).DataFieldStatus[1] = (val)&0xFF)
+
+/*GROUND side code*/
+#define TMTF_MY_RD_VERSION
+...
 
 #endif /* _tmtf_my_h_ */
