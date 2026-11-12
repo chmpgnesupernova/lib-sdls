@@ -2,17 +2,17 @@
 #ifndef _tmtf_my_h_
 #define _tmtf_my_h_
 
-//#include "common_types.h"
+#include <stdint.h>
 
 #define TMTF_MY_PRIHDR_LENGTH   6
 #define TMTF_MY_SEGLENGTHID_PKT 3 /* Binary 11 is required for the packet service */
 
 typedef struct
 {
-    uint8 Id[2];              /* TFVN, SCID, VCID, OCF flag */
-    uint8 McFrameCount;       /* Master Channel Frame Count */
-    uint8 VcFrameCount;       /* Virtual Channel Frame Count */
-    uint8 DataFieldStatus[2]; /* Flags and First Header Pointer */
+    uint8_t Id[2];              /* TFVN, SCID, VCID, OCF flag */
+    uint8_t McFrameCount;       /* Master Channel Frame Count */
+    uint8_t VcFrameCount;       /* Virtual Channel Frame Count */
+    uint8_t DataFieldStatus[2]; /* Flags and First Header Pointer */
 } TMTF_my_PriHdr_t;
 
 /*SAT side code*/
@@ -34,7 +34,23 @@ typedef struct
         ((hdr).DataFieldStatus[1] = (val)&0xFF)
 
 /*GROUND side code*/
-#define TMTF_MY_RD_VERSION
-...
+/* Read macros mirror the SAT side write macros above bit for bit.
+ * Read macros take the header itself, not a pointer to it.
+ * Id[0]: TFVN(7-6) SCID high 6 bits(5-0)
+ * Id[1]: SCID low 4 bits(7-4) VCID(3-1) OCF flag(0)
+ * DataFieldStatus[0]: flags(7-5) Segment Length ID(4-3) First Header Pointer high(2-0)
+ * DataFieldStatus[1]: First Header Pointer low */
+#define TMTF_MY_RD_TF_VERSION(hdr) (((hdr).Id[0] >> 6) & 0x03)
+
+#define TMTF_MY_RD_SCID(hdr) ((((hdr).Id[0] & 0x3F) << 4) | (((hdr).Id[1] >> 4) & 0x0F))
+
+#define TMTF_MY_RD_VCID(hdr) (((hdr).Id[1] >> 1) & 0x07)
+
+#define TMTF_MY_RD_MCFRMCNT(hdr) ((hdr).McFrameCount)
+#define TMTF_MY_RD_VCFRMCNT(hdr) ((hdr).VcFrameCount)
+
+#define TMTF_MY_RD_SEGLENGTHID(hdr) (((hdr).DataFieldStatus[0] >> 3) & 0x03)
+
+#define TMTF_MY_RD_FIRSTHDRPTR(hdr) ((((hdr).DataFieldStatus[0] & 0x07) << 8) | (hdr).DataFieldStatus[1])
 
 #endif /* _tmtf_my_h_ */
