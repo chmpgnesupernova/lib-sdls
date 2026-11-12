@@ -16,3 +16,12 @@ set_target_properties(sdls PROPERTIES
   SOVERSION ${PROJECT_VERSION_MAJOR})
 
 target_compile_options(sdls PRIVATE -Wall -Wextra)
+
+# Python ctypes tests in test/ (run with: ctest --test-dir build --output-on-failure)
+enable_testing()
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME python_sdlp
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/test -v)
+  set_tests_properties(python_sdlp PROPERTIES ENVIRONMENT "SDLS_LIB=$<TARGET_FILE:sdls>")
+endif()
