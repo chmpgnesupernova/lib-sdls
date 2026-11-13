@@ -1,0 +1,4 @@
+/home/yujin/lib_sdls/CMakeFiles/sdls.dir
+/home/yujin/lib_sdls/CMakeFiles/test.dir
+/home/yujin/lib_sdls/CMakeFiles/edit_cache.dir
+/home/yujin/lib_sdls/CMakeFiles/rebuild_cache.dir

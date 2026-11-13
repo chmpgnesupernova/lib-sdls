@@ -1,0 +1,1 @@
+/usr/bin/cc -fPIC -shared -Wl,--dependency-file=CMakeFiles/sdls.dir/link.d -Wl,-soname,libsdls.so.0 -o libsdls.so.0.1.0 CMakeFiles/sdls.dir/src/sdlp/tc_sdlp_my.c.o CMakeFiles/sdls.dir/src/sdlp/tm_sdlp_my.c.o
