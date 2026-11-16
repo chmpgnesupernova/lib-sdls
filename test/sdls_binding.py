@@ -1,9 +1,9 @@
-"""ctypes binding for libsdls.so (ground side SDLP).
+"""ctypes binding for libsdls.so (ground side SDLP / SDLS / EP).
 
 The ground system can use this module as is, or as a reference for its own binding.
 
-ctypes cannot read #define values, so the constants below are copied from
-include/tc_sdlp_my.h and include/tm_sdlp_my.h. Keep them in sync with the headers.
+ctypes cannot read #define values, so the constants below are copied from the headers
+in include/ (tc_sdlp_my.h, tm_sdlp_my.h, sa/, sdls/, ep/). Keep them in sync.
 """
 
 import ctypes
@@ -18,7 +18,7 @@ TCTF_MAX_FRAME_LENGTH = 1024
 TC_SPP_HDR_LENGTH = 6
 TC_SPP_MIN_LENGTH = 7
 TC_SDLS_HDR_LENGTH = 14  # Security Header: SPI 2 + IV 12
-TC_SDLS_TRL_LENGTH = 0
+TC_SDLS_TRL_LENGTH = 16  # Security Trailer: MAC (zero filled on SA00)
 TC_FECF_LENGTH = 0
 TC_MAX_PACKET_LENGTH = (
     TCTF_MAX_FRAME_LENGTH - TCTF_PRIHDR_LENGTH - TC_SDLS_HDR_LENGTH - TC_SDLS_TRL_LENGTH - TC_FECF_LENGTH
@@ -51,7 +51,7 @@ TMTF_PRIHDR_LENGTH = 6
 TMTF_SEGLENGTHID_PKT = 3
 TM_FRAME_SIZE = 1786
 TM_SDLS_HDR_LENGTH = 14
-TM_SDLS_TRL_LENGTH = 0
+TM_SDLS_TRL_LENGTH = 16  # Security Trailer: MAC (zero filled on SA10)
 TM_DATA_OFFSET = TMTF_PRIHDR_LENGTH + TM_SDLS_HDR_LENGTH
 TM_DATA_END = TM_FRAME_SIZE - TM_SDLS_TRL_LENGTH
 TM_DATA_LENGTH = TM_DATA_END - TM_DATA_OFFSET
@@ -76,6 +76,26 @@ TM_ERROR_NAMES = {
     TM_INVALID_HEADER: "TM_SDLP_MY_INVALID_HEADER",
     TM_SECURITY_ERROR: "TM_SDLP_MY_SECURITY_ERROR",
 }
+
+# SDLS frame protection (include/sdls/sdls_my.h)
+SDLS_TRAILER_LENGTH = 16
+SDLS_CRYPTO_ERROR = -20
+SDLS_AUTH_FAIL = -21
+SDLS_UNSUPPORTED = -22
+
+# Key exchange (include/ep/ep_my.h, include/sa/sa_my.h)
+KEM_PK_LEN = 1184  # ML-KEM-768 ek
+KEM_SK_LEN = 2400
+KEM_CT_LEN = 1088
+DSA_PK_LEN = 1952  # ML-DSA-65
+DSA_SK_LEN = 4032
+DSA_SIG_LEN = 3309
+EP_DSA_CONTEXT = b"lib-sdls EP v1"
+EP_KDF_INFO_TC = b"lib-sdls SESS_TC v1"
+EP_KDF_INFO_TM = b"lib-sdls SESS_TM v1"
+EP_CRYPTO_ERROR = -30
+EP_NO_PENDING = -31
+EP_UNSUPPORTED = -32
 
 # SA / Key DB in shared memory (include/sa/sa_shm_my.h, include/sa/sa_my.h)
 SA_SHM_DEFAULT_NAME = "/sdls_sa_db"
@@ -128,6 +148,12 @@ SA_ERROR_NAMES = {
     SA_KEY_IN_USE: "SA_MY_KEY_IN_USE",
     SA_IV_EXHAUSTED: "SA_MY_IV_EXHAUSTED",
     SA_REPLAY: "SA_MY_REPLAY",
+    SDLS_CRYPTO_ERROR: "SDLS_MY_CRYPTO_ERROR",
+    SDLS_AUTH_FAIL: "SDLS_MY_AUTH_FAIL",
+    SDLS_UNSUPPORTED: "SDLS_MY_UNSUPPORTED",
+    EP_CRYPTO_ERROR: "EP_MY_CRYPTO_ERROR",
+    EP_NO_PENDING: "EP_MY_NO_PENDING",
+    EP_UNSUPPORTED: "EP_MY_UNSUPPORTED",
 }
 
 
@@ -209,10 +235,11 @@ class Sdls:
         lib.TC_SDLP_myBuildFrame.restype = ctypes.c_int32
 
         lib.TM_SDLP_myExtractPacket.argtypes = [
-            ctypes.c_void_p,
+            ctypes.c_void_p,  # writable frame buffer: SA11 frames are decrypted in place
             ctypes.c_size_t,
             ctypes.POINTER(ctypes.c_size_t),
             ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_uint16),
         ]
         lib.TM_SDLP_myExtractPacket.restype = ctypes.c_int32
 
@@ -232,6 +259,13 @@ class Sdls:
             ("SA_myCommitArsn", [u16, p]),
             ("SECHDR_myApplyTc", [u16, p, ctypes.c_size_t, p]),
             ("SECHDR_myProcessTm", [p, ctypes.c_size_t, ctypes.POINTER(u16), p]),
+            ("SA_mySetDsaKey", [p, ctypes.c_size_t, p, ctypes.c_size_t]),
+            ("SDLS_myApplySecurityTc", [u16, p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t]),
+            ("SDLS_myProcessSecurityTm", [p, ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(u16)]),
+            ("EP_myAcceptKemPublicKey", [p, ctypes.c_size_t, p, ctypes.c_size_t]),
+            ("EP_myGetPendingCiphertext", [p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]),
+            ("EP_mySign", [p, ctypes.c_size_t, p, ctypes.POINTER(ctypes.c_size_t)]),
+            ("EP_myStartSessions", []),
         ):
             func = getattr(lib, name)
             func.argtypes = argtypes
@@ -258,19 +292,31 @@ class Sdls:
             raise SdlsError("TC_SDLP_myBuildFrame", status, TC_ERROR_NAMES)
         return buf.raw[:status]
 
-    def tm_extract_packets(self, frame):
-        """Returns every Space Packet in one TM frame, in order. Needs sa_open() first."""
+    def tm_extract(self, frame):
+        """Processes one TM frame. Returns (spi, packets): the SA it came on and every
+        Space Packet in it, in order (decrypted for SA11). Needs sa_open() first.
+
+        Route by spi: SPI_SA10 packets are unauthenticated EP PDUs (key exchange handler
+        only), SPI_SA11 packets are protected telemetry."""
         frame = bytes(frame)
+        buf = ctypes.create_string_buffer(frame, len(frame))  # writable: decrypted in place
         cursor = ctypes.c_size_t(0)
         offset = ctypes.c_size_t(0)
+        spi = ctypes.c_uint16(0)
         packets = []
         while True:
-            status = self.lib.TM_SDLP_myExtractPacket(frame, len(frame), ctypes.byref(cursor), ctypes.byref(offset))
+            status = self.lib.TM_SDLP_myExtractPacket(
+                buf, len(frame), ctypes.byref(cursor), ctypes.byref(offset), ctypes.byref(spi)
+            )
             if status < 0:
                 raise SdlsError("TM_SDLP_myExtractPacket", status, TM_ERROR_NAMES)
             if status == 0:
-                return packets
-            packets.append(frame[offset.value : offset.value + status])
+                return spi.value, packets
+            packets.append(buf.raw[offset.value : offset.value + status])
+
+    def tm_extract_packets(self, frame):
+        """Every Space Packet in one TM frame, in order (see tm_extract)."""
+        return self.tm_extract(frame)[1]
 
     # --- SA / Key DB (shared memory) -------------------------------------------------
     # The sender and receiver processes both call sa_open() with the same name and then
@@ -317,6 +363,11 @@ class Sdls:
         key = bytes(key)
         self._sa_call("SA_mySetKey", key_id, key, len(key))
 
+    def sa_set_dsa_key(self, pk, sk):
+        """Loads the ground ML-DSA-65 key pair that signs EP PDUs."""
+        pk, sk = bytes(pk), bytes(sk)
+        self._sa_call("SA_mySetDsaKey", pk, len(pk), sk, len(sk))
+
     def sa_next_iv(self, spi):
         iv = ctypes.create_string_buffer(GCM_IV_LEN)
         self._sa_call("SA_myNextIv", spi, iv)
@@ -345,3 +396,43 @@ class Sdls:
         iv = ctypes.create_string_buffer(SECHDR_IV_LENGTH)
         self._sa_call("SECHDR_myProcessTm", hdr, len(hdr), ctypes.byref(spi), iv)
         return spi.value, iv.raw
+
+    # --- SDLS frame protection ----------------------------------------------------------
+
+    def sdls_process_tm(self, frame):
+        """Runs SDLS ProcessSecurity on a whole TM frame. Returns (spi, processed frame):
+        a protected frame comes back with its data field decrypted."""
+        buf = ctypes.create_string_buffer(bytes(frame), len(frame))
+        spi = ctypes.c_uint16()
+        self._sa_call("SDLS_myProcessSecurityTm", buf, len(frame), TMTF_PRIHDR_LENGTH, ctypes.byref(spi))
+        return spi.value, buf.raw
+
+    # --- Key exchange (EP) --------------------------------------------------------------
+
+    def ep_accept_kem_public_key(self, ek):
+        """Ground side of the key exchange: encapsulates to the satellite ek, loads the
+        derived session keys (SA01/SA11 Keyed) and returns the ciphertext for StartSA."""
+        ek = bytes(ek)
+        ct = ctypes.create_string_buffer(KEM_CT_LEN)
+        self._sa_call("EP_myAcceptKemPublicKey", ek, len(ek), ct, len(ct))
+        return ct.raw
+
+    def ep_pending_ciphertext(self):
+        """The ciphertext of the exchange in progress (any process). SdlsError
+        EP_NO_PENDING when there is none."""
+        ct = ctypes.create_string_buffer(KEM_CT_LEN)
+        n = ctypes.c_size_t(0)
+        self._sa_call("EP_myGetPendingCiphertext", ct, len(ct), ctypes.byref(n))
+        return ct.raw[: n.value]
+
+    def ep_sign(self, msg):
+        """ML-DSA-65 signature of an EP PDU with the ground key and EP_DSA_CONTEXT."""
+        msg = bytes(msg)
+        sig = ctypes.create_string_buffer(DSA_SIG_LEN)
+        n = ctypes.c_size_t(len(sig))
+        self._sa_call("EP_mySign", msg, len(msg), sig, ctypes.byref(n))
+        return sig.raw[: n.value]
+
+    def ep_start_sessions(self):
+        """After the satellite confirmed StartSA: SA01 / SA11 -> Operational."""
+        self._sa_call("EP_myStartSessions")

@@ -10,7 +10,7 @@ import unittest
 
 import sdls_binding as b
 from sat_reference import SatTmFramer, make_spp
-from test_sa_shm import SaShmTestBase
+from test_sa_shm import KEY_B, SaShmTestBase
 
 
 def data_of(total_packet_size, fill=0x5A):
@@ -23,14 +23,18 @@ class TmExtractPacketTest(SaShmTestBase):
     SatTmFramer sends on SA10 unless a test picks another SPI."""
 
     def extract_raw(self, frame, cursor_value=0, frame_size=None):
+        buf = ctypes.create_string_buffer(bytes(frame), max(len(frame), 1))  # writable
         cursor = ctypes.c_size_t(cursor_value)
         offset = ctypes.c_size_t(0)
         size = len(frame) if frame_size is None else frame_size
-        status = self.sdls.lib.TM_SDLP_myExtractPacket(frame, size, ctypes.byref(cursor), ctypes.byref(offset))
+        status = self.sdls.lib.TM_SDLP_myExtractPacket(buf, size, ctypes.byref(cursor), ctypes.byref(offset), None)
         return status, cursor.value, offset.value
 
     @staticmethod
     def frames_for(packets, **framer_args):
+        """Satellite frames; a session SA (SA11) is encrypted with the key bring_up_tm loads."""
+        if framer_args.get("spi") == b.SPI_SA11:
+            framer_args.setdefault("key", KEY_B)
         framer = SatTmFramer(**framer_args)
         for packet in packets:
             framer.forward_packet(packet)
@@ -221,10 +225,11 @@ class TmExtractPacketTest(SaShmTestBase):
         (frame,) = self.frames_for([make_spp(0x136, b"\x00")])
         cursor = ctypes.c_size_t(0)
         offset = ctypes.c_size_t(0)
+        buf = ctypes.create_string_buffer(frame, len(frame))
         f = self.sdls.lib.TM_SDLP_myExtractPacket
-        self.assertEqual(f(None, len(frame), ctypes.byref(cursor), ctypes.byref(offset)), b.TM_INVALID_ARGUMENT)
-        self.assertEqual(f(frame, len(frame), None, ctypes.byref(offset)), b.TM_INVALID_ARGUMENT)
-        self.assertEqual(f(frame, len(frame), ctypes.byref(cursor), None), b.TM_INVALID_ARGUMENT)
+        self.assertEqual(f(None, len(frame), ctypes.byref(cursor), ctypes.byref(offset), None), b.TM_INVALID_ARGUMENT)
+        self.assertEqual(f(buf, len(frame), None, ctypes.byref(offset), None), b.TM_INVALID_ARGUMENT)
+        self.assertEqual(f(buf, len(frame), ctypes.byref(cursor), None, None), b.TM_INVALID_ARGUMENT)
 
     def test_wrapper_raises_sdls_error(self):
         with self.assertRaises(b.SdlsError) as ctx:

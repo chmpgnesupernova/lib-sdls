@@ -78,20 +78,16 @@ int32_t TC_SDLP_myBuildFrame(uint16_t spi, const void *pPacket, size_t packetSiz
     TCTF_MY_WR_FRAMELEN(*pHdr, frameSize - 1);
     TCTF_MY_WR_SEQNUM(*pHdr, pFrameInfo->frameSeqNum);
 
-    /* Security Header: SPI and a fresh IV from the SA. Done after every other check,
-     * so a frame that is refused anyway never consumes an IV. */
-    if (SECHDR_myApplyTc(spi, pFrame + TCTF_MY_PRIHDR_LENGTH, bufSize - TCTF_MY_PRIHDR_LENGTH, NULL) !=
-        SA_MY_SUCCESS)
-    {
-        return TC_SDLP_MY_SECURITY_ERROR;
-    }
-
     /* The data field holds exactly one Space Packet. */
     memcpy(pFrame + pFrameInfo->dataFieldOffset, pSpp, packetSize);
 
-    /* Security Trailer (0 bytes now). Later the data field is encrypted and the MAC is
-     * computed here with the IV written above. */
-    memset(pFrame + pFrameInfo->dataFieldOffset + packetSize, 0, TC_SDLP_MY_SDLS_TRL_LENGTH);
+    /* Security Header, encryption and Security Trailer, as the SA says. Runs after every
+     * frame check, with the Primary Header final (it is authenticated). */
+    if (SDLS_myApplySecurityTc(spi, pFrame, TCTF_MY_PRIHDR_LENGTH, packetSize, bufSize) != SA_MY_SUCCESS)
+    {
+        memset(pFrame, 0, frameSize); /* never leave a half built frame (or plaintext) behind */
+        return TC_SDLP_MY_SECURITY_ERROR;
+    }
 
     /* The optional FECF is not used, so no CRC is appended. */
 

@@ -15,7 +15,7 @@
 #include "sa_shm_internal.h"
 
 #define SA_MY_SHM_MAGIC   0x534C4453u /* "SDLS" */
-#define SA_MY_SHM_VERSION 1u
+#define SA_MY_SHM_VERSION 2u /* 2: EP pending ciphertext */
 
 /* Layout of the shared segment. Every process must use the same library build;
  * the header check in SA_myOpen rejects a segment made by a different layout. */
@@ -28,6 +28,11 @@ typedef struct
     pthread_mutex_t lock;    /* process-shared, robust */
     common_sa_db_t  saDb;
     common_key_db_t keyDb;
+    /* Key exchange in progress (ep/ep_my.c): the ML-KEM ciphertext made by the process
+     * that received the satellite ek, kept for the process that sends StartSA. Public
+     * data, but cleared once the sessions start. */
+    uint32_t epCtLen; /* 0: nothing pending */
+    uint8_t  epCt[COMMON_KEM_CT_LEN];
 } SA_myShm_t;
 
 /* This process's mapping. openLock only guards SA_myOpen/SA_myClose against other
@@ -682,6 +687,118 @@ int32_t SA_myCommitArsn(uint16_t spi, const uint8_t *pIv)
     if (status == SA_MY_SUCCESS)
     {
         memcpy(pSa->iv, pIv, COMMON_GCM_IV_LEN);
+    }
+
+    SA_myUnlock();
+    return status;
+}
+
+/* --- ground ML-DSA key (EP PDU signing) ---------------------------------------------- */
+
+int32_t SA_mySetDsaKey(const uint8_t *pPk, size_t pkLen, const uint8_t *pSk, size_t skLen)
+{
+    common_dsa_key_t *pKey;
+    int32_t           status;
+
+    if ((pPk == NULL) || (pSk == NULL) || (pkLen != COMMON_DSA_PK_LEN) || (skLen != COMMON_DSA_SK_LEN))
+    {
+        return SA_MY_INVALID_ARGUMENT;
+    }
+    if ((status = SA_myLock()) != SA_MY_SUCCESS)
+    {
+        return status;
+    }
+
+    pKey = &SA_myShm->keyDb.gs_dsa;
+    memcpy(pKey->pk, pPk, COMMON_DSA_PK_LEN);
+    memcpy(pKey->sk, pSk, COMMON_DSA_SK_LEN);
+    pKey->has_sk = 1;
+    pKey->alg    = COMMON_ALG_ML_DSA_65;
+    pKey->state  = COMMON_KEY_ACTIVE;
+
+    SA_myUnlock();
+    return status;
+}
+
+int32_t SA_myCopyDsaSecretKey(uint8_t *pSk)
+{
+    const common_dsa_key_t *pKey;
+    int32_t                 status;
+
+    if (pSk == NULL)
+    {
+        return SA_MY_INVALID_ARGUMENT;
+    }
+    if ((status = SA_myLock()) != SA_MY_SUCCESS)
+    {
+        return status;
+    }
+
+    pKey = &SA_myShm->keyDb.gs_dsa;
+    if ((pKey->state != COMMON_KEY_ACTIVE) || !pKey->has_sk)
+    {
+        status = SA_MY_UNKNOWN_KEY;
+    }
+    else
+    {
+        memcpy(pSk, pKey->sk, COMMON_DSA_SK_LEN);
+    }
+
+    SA_myUnlock();
+    return status;
+}
+
+/* --- key exchange ciphertext ----------------------------------------------------------- */
+
+int32_t SA_myStorePendingCt(const uint8_t *pCt, size_t ctLen)
+{
+    int32_t status;
+
+    if ((ctLen > COMMON_KEM_CT_LEN) || ((pCt == NULL) && (ctLen != 0)))
+    {
+        return SA_MY_INVALID_ARGUMENT;
+    }
+    if ((status = SA_myLock()) != SA_MY_SUCCESS)
+    {
+        return status;
+    }
+
+    memset(SA_myShm->epCt, 0, sizeof(SA_myShm->epCt));
+    if (ctLen != 0)
+    {
+        memcpy(SA_myShm->epCt, pCt, ctLen);
+    }
+    SA_myShm->epCtLen = (uint32_t)ctLen;
+
+    SA_myUnlock();
+    return status;
+}
+
+int32_t SA_myLoadPendingCt(uint8_t *pCt, size_t ctSize, size_t *pCtLen)
+{
+    int32_t status;
+
+    if ((pCt == NULL) || (pCtLen == NULL))
+    {
+        return SA_MY_INVALID_ARGUMENT;
+    }
+    if ((status = SA_myLock()) != SA_MY_SUCCESS)
+    {
+        return status;
+    }
+
+    if (SA_myShm->epCtLen == 0)
+    {
+        status = SA_MY_INVALID_STATE;
+    }
+    else if (ctSize < SA_myShm->epCtLen)
+    {
+        status = SA_MY_INVALID_ARGUMENT;
+    }
+    else
+    {
+        memcpy(pCt, SA_myShm->epCt, SA_myShm->epCtLen);
+        *pCtLen = SA_myShm->epCtLen;
     }
 
     SA_myUnlock();
