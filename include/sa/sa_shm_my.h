@@ -93,6 +93,11 @@ int32_t SA_myExpire(uint16_t spi);
  * uses that key ID. The caller must supply a fresh key every time (key exchange output). */
 int32_t SA_mySetKey(uint16_t keyId, const uint8_t *pKey, size_t keyLen);
 
+/* Loads the ground ML-DSA key pair used to sign EP PDUs (FIPS 204 raw formats:
+ * pk COMMON_DSA_PK_LEN, sk COMMON_DSA_SK_LEN bytes) and marks it ACTIVE. The secret key
+ * never leaves the library afterwards: there is no exported getter. */
+int32_t SA_mySetDsaKey(const uint8_t *pPk, size_t pkLen, const uint8_t *pSk, size_t skLen);
+
 /* --- Per frame counters ----------------------------------------------------------------- */
 
 /* Send side (TC SA, Operational). Writes the IV for the next frame to pIv

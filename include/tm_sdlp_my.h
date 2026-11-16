@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sdls/sdls_my.h"
 #include "sdls/sechdr_my.h"
 #include "tf/tmtf_my.h"
 
@@ -16,7 +17,7 @@
 #define TM_SDLP_MY_INVALID_LENGTH   (-3)
 #define TM_SDLP_MY_INVALID_PACKET   (-4)
 #define TM_SDLP_MY_INVALID_HEADER   (-5)
-#define TM_SDLP_MY_SECURITY_ERROR   (-6) /* Security Header refused (SPI, SA state, replay) */
+#define TM_SDLP_MY_SECURITY_ERROR   (-6) /* refused by SDLS (SPI, SA state, replay, MAC) */
 
 /* Fixed dummy channel IDs written into the premade frame header by the SAT side. */
 #define TM_SDLP_MY_DUMMY_TFVN 0
@@ -25,10 +26,10 @@
 
 #define TM_SDLP_MY_FRAME_SIZE 1786
 
-/* SDLS Security Header right after the Primary Header: SPI 2 + IV 12 bytes.
- * No Security Trailer yet: frames are neither decrypted nor MAC checked. */
+/* SDLS Security Header right after the Primary Header (SPI 2 + IV 12 bytes) and the
+ * Security Trailer (16 byte MAC) at the frame end. The same layout for every SA. */
 #define TM_SDLP_MY_SDLS_HDR_LENGTH SECHDR_MY_LENGTH
-#define TM_SDLP_MY_SDLS_TRL_LENGTH 0
+#define TM_SDLP_MY_SDLS_TRL_LENGTH SDLS_MY_TRAILER_LENGTH
 
 /* Data field position inside the frame. */
 #define TM_SDLP_MY_DATA_OFFSET (TMTF_MY_PRIHDR_LENGTH + TM_SDLP_MY_SDLS_HDR_LENGTH)
@@ -55,26 +56,32 @@
 /* GROUND side code */
 
 /* Finds the next Space Packet in one received TM frame (offset iteration).
- * pFrame        : received frame
+ * pFrame        : received frame, in a WRITABLE buffer: on the cursor 0 call a session
+ *                 frame (SA11) is MAC checked and decrypted in place
  * frameSize     : size of pFrame in bytes (must be TM_SDLP_MY_FRAME_SIZE)
- * pCursor       : in/out. Set to 0 before the first call for a frame; the frame
- *                 frame header and the Security Header are checked on that call.
+ * pCursor       : in/out. Set to 0 before the first call for a frame; the Primary
+ *                 Header and SDLS (SDLS_myProcessSecurityTm) are processed on that call.
  *                 Advanced past the returned packet.
  * pPacketOffset : out. Offset of the returned packet from the frame start.
+ * pSpi          : out, may be NULL. Written on the cursor 0 call: the SA the frame came
+ *                 on. SA10 packets are unauthenticated EP PDUs and must go to the key
+ *                 exchange handler only; SA11 packets are protected telemetry.
  * Returns the packet size (> 0), 0 when the frame has no more packets
  * (the idle packet or the data field end was reached), or a negative error code.
  *
- * Needs SA_myOpen (sa/sa_shm_my.h) in this process first. The Security Header SPI
- * must name an Operational TM SA: SA10 (EP PDUs, IV ignored) or SA11 (session, IV must
- * be a new ARSN within the window). An accepted SA11 ARSN is recorded at once, so the
- * same frame passed again with cursor 0 is refused as a replay.
- * TM_SDLP_MY_SECURITY_ERROR: SECHDR_myProcessTm refused the header, or the SA DB is
- * not open.
+ * Needs SA_myOpen (sa/sa_shm_my.h) in this process first. The SPI must name an
+ * Operational TM SA: SA10 (EP PDUs, IV and MAC ignored) or SA11 (session: the IV must be
+ * a new ARSN within the window and the MAC must verify). The ARSN is recorded only after
+ * the MAC verifies, so the same frame passed again with cursor 0 is refused as a replay.
+ * TM_SDLP_MY_SECURITY_ERROR: SDLS refused the frame (SPI, SA state, replay, MAC), or the
+ * SA DB is not open. A frame that fails the MAC is left with its data field zeroized.
  *
  * Python (ctypes) usage:
- *   cursor, off = c_size_t(0), c_size_t(0)
- *   while (n := lib.TM_SDLP_myExtractPacket(frame, len(frame), byref(cursor), byref(off))) > 0:
- *       packet = frame[off.value : off.value + n]                                      */
-int32_t TM_SDLP_myExtractPacket(const void *pFrame, size_t frameSize, size_t *pCursor, size_t *pPacketOffset);
+ *   buf = ctypes.create_string_buffer(frame, len(frame))
+ *   cursor, off, spi = c_size_t(0), c_size_t(0), c_uint16(0)
+ *   while (n := lib.TM_SDLP_myExtractPacket(buf, len(frame), byref(cursor), byref(off), byref(spi))) > 0:
+ *       packet = buf.raw[off.value : off.value + n]                                     */
+int32_t TM_SDLP_myExtractPacket(void *pFrame, size_t frameSize, size_t *pCursor, size_t *pPacketOffset,
+                                uint16_t *pSpi);
 
 #endif /* _tm_sdlp_my_h_ */

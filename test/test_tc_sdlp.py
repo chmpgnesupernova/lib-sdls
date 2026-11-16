@@ -1,7 +1,8 @@
 """TC_SDLP_myInit / TC_SDLP_myBuildFrame tests.
 
 Every frame built by the ground side must pass the satellite side TC_SDLP_myExtractPacket.
-Frame: [Primary Header 5][Security Header 14: SPI 2 + IV 12][Space Packet].
+Frame: [Primary Header 5][Security Header 14: SPI 2 + IV 12][Space Packet][MAC 16].
+SA00 frames carry the packet in clear with a zero MAC; SA01 frames are AES-256-GCM.
 """
 
 import ctypes
@@ -13,10 +14,11 @@ import unittest
 
 import sdls_binding as b
 from sat_reference import make_spp, sat_tc_extract_packet, tc_header_fields, tc_sechdr_fields
-from test_sa_shm import SaShmTestBase
+from test_sa_shm import KEY_A, SaShmTestBase
 
 MAX_DATA_LENGTH = b.TC_MAX_PACKET_LENGTH - b.TC_SPP_HDR_LENGTH
 DATA_OFFSET = b.TCTF_PRIHDR_LENGTH + b.TC_SDLS_HDR_LENGTH
+OVERHEAD = DATA_OFFSET + b.TC_SDLS_TRL_LENGTH  # frame size = OVERHEAD + packet size
 
 
 class TcBuildFrameTest(SaShmTestBase):
@@ -44,13 +46,14 @@ class TcBuildFrameTest(SaShmTestBase):
                 with self.subTest(spi=spi, data_length=data_length):
                     packet = make_spp(0x18, bytes(i & 0xFF for i in range(data_length)))
                     frame = self.sdls.tc_build_frame(spi, packet)
-                    self.assertEqual(sat_tc_extract_packet(frame), packet)
+                    self.assertEqual(sat_tc_extract_packet(frame, tc_key=KEY_A), packet)
 
     def test_frame_layout(self):
         packet = make_spp(0x18, b"\xAA" * 40)
         frame = self.sdls.tc_build_frame(b.SPI_SA00, packet)
-        self.assertEqual(len(frame), b.TCTF_PRIHDR_LENGTH + b.SECHDR_LENGTH + len(packet))
-        self.assertEqual(frame[DATA_OFFSET:], packet)
+        self.assertEqual(len(frame), OVERHEAD + len(packet))
+        self.assertEqual(frame[DATA_OFFSET:-b.TC_SDLS_TRL_LENGTH], packet)
+        self.assertEqual(frame[-b.TC_SDLS_TRL_LENGTH:], bytes(b.TC_SDLS_TRL_LENGTH))  # SA00: zero MAC
 
     def test_max_packet_fills_the_frame(self):
         frame = self.sdls.tc_build_frame(b.SPI_SA00, make_spp(0x18, bytes(MAX_DATA_LENGTH)))
@@ -82,7 +85,8 @@ class TcBuildFrameTest(SaShmTestBase):
 
     def test_buffer_of_exact_frame_size_is_enough(self):
         packet = make_spp(0x18, b"\x55" * 10)
-        self.assertEqual(self.build_raw(packet, buf_size=DATA_OFFSET + len(packet)), DATA_OFFSET + len(packet))
+        self.assertEqual(self.build_raw(packet, buf_size=OVERHEAD + len(packet)), OVERHEAD + len(packet))
+        self.assertEqual(self.build_raw(packet, buf_size=OVERHEAD + len(packet) - 1), b.TC_BUFFER_TOO_SMALL)
 
     # --- Security Header --------------------------------------------------------------
 
@@ -195,7 +199,7 @@ class TcFreshLibraryTest(unittest.TestCase):
             self.assertEqual(build(), b.TC_SECURITY_ERROR)  # SA DB not open
             try:
                 fresh.sa_open(name)
-                self.assertEqual(build(), DATA_OFFSET + len(packet))
+                self.assertEqual(build(), OVERHEAD + len(packet))
             finally:
                 fresh.sa_close()
                 fresh.sa_unlink(name)

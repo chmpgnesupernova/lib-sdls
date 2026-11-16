@@ -4,12 +4,13 @@
     python3 test/frame_view.py --hex      # also a full offset hex dump of each frame
 
 Frames:
-    TC: [Primary Header 5][Security Header 14: SPI 2 + IV 12][Space Packet][Trailer 0]
-    TM: [Primary Header 6][Security Header 14: SPI 2 + IV 12][Space Packets + idle][Trailer 0]
+    TC: [Primary Header 5][Security Header 14: SPI 2 + IV 12][Space Packet][MAC 16]
+    TM: [Primary Header 6][Security Header 14: SPI 2 + IV 12][Space Packets + idle][MAC 16]
 
-TC frames come from the ground library (TC_SDLP_myBuildFrame). TM frames come from the
-satellite reference (SatTmFramer) and are then passed through the ground library
-(TM_SDLP_myExtractPacket), as the ground system receives them.
+TC frames come from the ground library (TC_SDLP_myBuildFrame): an SA01 frame is shown as
+sent (data field encrypted). TM frames come from the satellite reference (SatTmFramer)
+and are shown after the ground library processed them (SDLS_myProcessSecurityTm): an
+SA11 frame is shown decrypted, with the MAC that verified.
 The SA DB is a private shared memory segment, removed at the end.
 """
 
@@ -130,8 +131,12 @@ def show_tc(title, frame, show_hex=False):
     section("SDLS Security Header", pri_end, frame[pri_end:sec_end],
             f"SPI={sec['SPI']:#06x} [{SPI_NAMES.get(sec['SPI'], 'unknown')}]  IV={sec['IV']} {iv_note(sec)}")
     packet = frame[sec_end:data_end]
-    section("Data Field: Space Packet", sec_end, packet, fields(decode_spp(packet)), HEX_PREVIEW)
-    section("SDLS Security Trailer (MAC, not added yet)", data_end, frame[data_end:])
+    if sec["SPI"] in (b.SPI_SA00, b.SPI_SA10):
+        section("Data Field: Space Packet", sec_end, packet, fields(decode_spp(packet)), HEX_PREVIEW)
+        section("SDLS Security Trailer (MAC zero filled: unprotected SA)", data_end, frame[data_end:])
+    else:
+        section("Data Field: Space Packet (AES-256-GCM ciphertext)", sec_end, packet, "", HEX_PREVIEW)
+        section("SDLS Security Trailer (MAC = GCM tag)", data_end, frame[data_end:])
     if show_hex:
         hexdump(frame)
     print()
@@ -151,7 +156,10 @@ def show_tm(title, frame, show_hex=False):
         spp = decode_spp(packet)
         name = "idle packet" if spp["APID"] == b.TM_IDLE_APID else "Space Packet"
         section(f"Data Field: {name}", sec_end + offset, packet, fields(spp), HEX_PREVIEW)
-    section("SDLS Security Trailer (MAC, not added yet)", data_end, frame[data_end:])
+    if sec["SPI"] in (b.SPI_SA00, b.SPI_SA10):
+        section("SDLS Security Trailer (MAC zero filled: unprotected SA)", data_end, frame[data_end:])
+    else:
+        section("SDLS Security Trailer (MAC = GCM tag, verified)", data_end, frame[data_end:])
     if show_hex:
         hexdump(frame)
     print()
@@ -160,10 +168,14 @@ def show_tm(title, frame, show_hex=False):
 # --- example frames -----------------------------------------------------------------------
 
 
+TC_KEY = bytes(range(32))
+TM_KEY = bytes(range(32, 64))
+
+
 def bring_up(sdls):
     """Simulates a finished key exchange: session keys loaded, SA01/SA11 Operational."""
-    sdls.sa_set_key(b.KEYID_SESS_TC, bytes(range(32)))
-    sdls.sa_set_key(b.KEYID_SESS_TM, bytes(range(32, 64)))
+    sdls.sa_set_key(b.KEYID_SESS_TC, TC_KEY)
+    sdls.sa_set_key(b.KEYID_SESS_TM, TM_KEY)
     for spi, key_id in ((b.SPI_SA01, b.KEYID_SESS_TC), (b.SPI_SA11, b.KEYID_SESS_TM)):
         sdls.sa_rekey(spi, key_id)
         sdls.sa_start(spi)
@@ -184,13 +196,14 @@ def main(show_hex=False):
 
         tlm = [make_spp(0x100, b"\xAA" * 10, seq_count=1), make_spp(0x101, b"\xBB" * 20, seq_count=2)]
         for spi in (b.SPI_SA10, b.SPI_SA11):
-            framer = SatTmFramer(spi=spi)
+            framer = SatTmFramer(spi=spi, key=TM_KEY)
             for packet in tlm:
                 framer.forward_packet(packet)
             framer.send_frame()
             (frame,) = framer.sent
-            extracted = sdls.tm_extract_packets(frame)  # ground check: SPI, SA, ARSN
-            show_tm(f"telemetry on {SPI_NAMES[spi][:4]} (ground extracted {len(extracted)} packets)", frame, show_hex)
+            # Ground processing: SPI, SA, ARSN, MAC, decryption.
+            _, processed = sdls.sdls_process_tm(frame)
+            show_tm(f"telemetry on {SPI_NAMES[spi][:4]}", processed, show_hex)
     finally:
         sdls.sa_close()
         sdls.sa_unlink(name)

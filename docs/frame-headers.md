@@ -3,7 +3,7 @@
 지상국 `libsdls.so`가 만들고 해석하는 프레임 헤더를 정리한 문서입니다.
 헤더마다 필드 구성, 구현 여부, 그리고 필드를 쓰거나 읽는 매크로·함수를 적었습니다.
 
-- 기준 코드: 현재 작업 트리 (커밋 `b44546c` 이후 미커밋 변경 포함)
+- 기준 코드: `ground-sdls-crypto` 브랜치 (SDLS 암호화, 키 교환 추가)
 - 기준 표준: CCSDS 232.0 (TC SDLP), 132.0 (TM SDLP), 355.0 (SDLS), 355.1 (SDLS-EP)
 - 범례: ✅ 구현 · ⚠️ 부분 구현 또는 고정값 · ❌ 미구현
 
@@ -15,16 +15,16 @@
 TC (지상 → 위성), 가변 길이, 최대 1024 B
 +------------------+-------------------------------+--------------+------------------+
 | Primary Header   | Security Header               | Data Field   | Security Trailer |
-| 5 B              | 14 B  (SPI 2 + IV 12)         | Space Packet | 0 B (MAC 미구현)  |
+| 5 B              | 14 B  (SPI 2 + IV 12)         | Space Packet | 16 B (MAC)       |
 +------------------+-------------------------------+--------------+------------------+
-  0                  5                               19
+  0                  5                               19             frame size - 16
 
 TM (위성 → 지상), 고정 길이 1786 B
 +------------------+-------------------------------+--------------------------+------------------+
 | Primary Header   | Security Header               | Data Field               | Security Trailer |
-| 6 B              | 14 B  (SPI 2 + IV 12)         | Space Packet들 + idle    | 0 B (MAC 미구현)  |
+| 6 B              | 14 B  (SPI 2 + IV 12)         | Space Packet들 + idle    | 16 B (MAC)       |
 +------------------+-------------------------------+--------------------------+------------------+
-  0                  6                               20                         1786
+  0                  6                               20                         1770             1786
 ```
 
 | 헤더 | 길이 | 상태 | 정의 파일 |
@@ -32,7 +32,7 @@ TM (위성 → 지상), 고정 길이 1786 B
 | TC Primary Header | 5 B | ✅ | [include/tf/tctf_my.h](../include/tf/tctf_my.h) |
 | TM Primary Header | 6 B | ✅ | [include/tf/tmtf_my.h](../include/tf/tmtf_my.h) |
 | SDLS Security Header (TC/TM 공통) | 14 B | ✅ | [include/sdls/sechdr_my.h](../include/sdls/sechdr_my.h) |
-| SDLS Security Trailer (MAC) | 0 B (계획 16 B) | ❌ | — |
+| SDLS Security Trailer (MAC) | 16 B | ✅ | [include/sdls/sdls_my.h](../include/sdls/sdls_my.h) |
 | TC Segment Header | 없음 | ❌ (Type-D 프레임, 쓰지 않음) | — |
 | FECF (CRC) | 없음 | ❌ (선택 항목, 쓰지 않음) | — |
 
@@ -145,15 +145,30 @@ GVCID(TFVN·SCID·VCID)와 SA의 `gvcid`가 일치하는지는 검사하지 않�
 
 ---
 
-## 5. Security Trailer, FECF (미구현)
+## 5. Security Trailer와 데이터 암호화 ([include/sdls/sdls_my.h](../include/sdls/sdls_my.h))
 
-| 항목 | 현재 | 계획 |
-|---|---|---|
-| Security Trailer (MAC) | 0 B (`TC/TM_SDLP_MY_SDLS_TRL_LENGTH`) | 16 B GCM 태그. 인증 범위는 SA `auth_mask_prihdr`(Primary Header) + SPI + 데이터. IV는 GCM nonce로 별도 입력 |
-| 데이터 필드 암호화 | 평문 | SA01/SA11에서 AES-256-GCM |
-| FECF | 0 B | 계획 없음 |
+모든 SA가 같은 레이아웃(Trailer 16 B)을 씁니다. 처리 방식은 SA가 정합니다.
 
-암호화와 MAC이 없으므로 **SA01/SA11 프레임도 현재는 평문이고 인증되지 않습니다.**
+| SA | `service_type` | Data Field | Trailer |
+|---|---|---|---|
+| SA00 (TC), SA10 (TM) | NONE | 평문 | 0으로 채움, 수신 측은 무시 |
+| SA01 (TC), SA11 (TM) | AUTH_ENC | AES-256-GCM 암호문 | GCM 태그 |
+| (예비) | AUTH | 평문 | GMAC (데이터를 AAD에 포함) |
+
+**위성과 바이트 단위로 같아야 하는 규칙 (AAD)**
+
+```
+AAD   = (Primary Header AND auth_mask_prihdr) || SPI(2 B, 프레임에 적힌 그대로)
+nonce = Security Header의 IV (12 B)
+MAC   = GCM 태그 16 B
+TC 마스크: FF FF FF FF FF        (Frame Length, Sequence Number 포함 전부 인증)
+TM 마스크: FF FF 00 FF FF FF     (MC Frame Count만 제외, 355.0 §4.2.2.6.2 d)
+```
+
+- TC 송신: Primary Header를 다 쓴 뒤(인증 대상) → SPI·IV 기록 → 데이터 암호화 → 태그 기록. 거절될 프레임은 IV를 소모하지 않습니다.
+- TM 수신: SPI·SA 상태 → ARSN 사전 검사 → 복호화·태그 검증 → **성공했을 때만** ARSN 기록. 실패한 프레임은 데이터 필드가 0으로 지워집니다.
+- TM 프레임은 제자리에서 복호화되므로 `TM_SDLP_myExtractPacket`에는 쓰기 가능한 버퍼를 넘깁니다.
+- FECF는 쓰지 않습니다.
 
 ---
 
@@ -177,11 +192,11 @@ SA DB는 공유메모리 `/dev/shm/sdls_sa_db`에 있고([include/sa/sa_shm_my.h
 | `spi` | ✅ | SA 조회 (모든 `SA_my*`) | 바꾸지 않음 (기본값 고정) |
 | `dir` | ✅ | `SECHDR_myApplyTc/ProcessTm`, `SA_myNextIv`(TC만), `SA_myCheck/CommitArsn`(TM만), `SA_myRekey`(IV 초기값 결정) | 바꾸지 않음 |
 | `gvcid` | ❌ | — (채널 ID 더미) | — |
-| `service_type` | ✅ | 보호 여부 판단 (NONE이면 IV 0/무시, 상태 전이 거부) | 바꾸지 않음 |
-| `len_iv`, `len_sn`, `len_pl`, `len_mac` | ❌ | — (고정 상수 14 B / 0 B 사용) | — |
-| `auth_alg` | ⚠️ | `SA_myRekey`에서 키 알고리즘이 맞는지 확인 | 바꾸지 않음 |
-| `enc_alg` | ❌ | — | — |
-| `auth_mask_prihdr`, `auth_mask_len` | ❌ | — (MAC 미구현) | — |
+| `service_type` | ✅ | `SDLS_my*`: NONE / AUTH / AUTH_ENC 처리 분기 (NONE이면 IV·MAC 0/무시, 상태 전이 거부) | 바꾸지 않음 |
+| `len_iv`, `len_sn`, `len_pl`, `len_mac` | ⚠️ | `SDLS_my*`: 보호 SA의 `len_iv`=12, `len_mac`=16인지 확인 (레이아웃 자체는 고정) | — |
+| `auth_alg` | ✅ | `SA_myRekey`(키 알고리즘 확인), `SDLS_my*`(AUTH: 구현 선택, AUTH_ENC: `enc_alg`와 같아야 함) | 바꾸지 않음 |
+| `enc_alg` | ✅ | `SDLS_my*`: 암호 레지스트리로 구현 선택 (AES-256-GCM) | 바꾸지 않음 |
+| `auth_mask_prihdr`, `auth_mask_len` | ✅ | `SDLS_my*`: AAD 구성 (5장). `auth_mask_len`이 Primary Header 길이와 다르면 거절 | 바꾸지 않음 |
 | `arsn_window` | ✅ | `SA_myCheckArsn`, `SA_myCommitArsn` | 바꾸지 않음 |
 | `auth_key_id` | ✅ | `SA_myStart`, `SA_myExpire`, 키 중복 사용 검사 | `SA_myRekey`(키 연결), `SA_myExpire`(NONE) |
 | `enc_key_id` | ✅ | 키 중복 사용 검사 | `SA_myRekey`, `SA_myExpire` |
@@ -243,23 +258,56 @@ SA00/SA10은 항상 Operational이고, 모든 전이를 거부합니다(`SA_MY_I
 | -15 | — | — | `KEY_IN_USE` |
 | -16 | — | — | `IV_EXHAUSTED` |
 | -17 | — | — | `REPLAY` |
+| -20 | — | — | `SDLS_MY_CRYPTO_ERROR` (암호 백엔드 실패) |
+| -21 | — | — | `SDLS_MY_AUTH_FAIL` (MAC 불일치: 위조, 손상, 키 불일치) |
+| -22 | — | — | `SDLS_MY_UNSUPPORTED` (SA 서비스 종류·알고리즘 미지원) |
+| -30 | — | — | `EP_MY_CRYPTO_ERROR` (KEM·KDF·서명 실패, 잘못된 ek 형식 등) |
+| -31 | — | — | `EP_MY_NO_PENDING` (진행 중인 키 교환 없음) |
+| -32 | — | — | `EP_MY_UNSUPPORTED` |
 
-`SECURITY_ERROR`(-6)는 SA 쪽 실패 원인을 하나로 묶은 코드입니다. 원인을 알고 싶으면 `SA_myGetSa`로 SA 상태를 직접 확인합니다.
+`SECURITY_ERROR`(-6)는 SDLS 쪽 실패 원인을 하나로 묶은 코드입니다. 원인을 알고 싶으면 `SDLS_myProcessSecurityTm` / `SDLS_myApplySecurityTc`를 직접 부르거나 `SA_myGetSa`로 SA 상태를 확인합니다.
 
 ---
 
-## 9. 미구현 요약
+## 9. 키 교환 (EP, [include/ep/ep_my.h](../include/ep/ep_my.h))
+
+```
+위성: ML-KEM 키쌍, ek ── TM SA10 ──▶ 지상(RoutingService): EP_myAcceptKemPublicKey(ek)
+                                      캡슐화 → ct, ss / HKDF → SESS_TC, SESS_TM
+                                      SA01·SA11: (Stop, Expire,) SetKey, Rekey → Keyed
+위성: 서명 검증, 역캡슐화, HKDF ◀── TC SA00 ── 지상(MiniCmdUtil): StartSA(ct 포함) + EP_mySign
+위성: 확인 응답 ── TM SA10 ──▶ 지상: EP_myStartSessions() → Operational
+```
+
+| 항목 | 값 (위성과 같아야 함) |
+|---|---|
+| KEM | ML-KEM-768, ek 1184 B, ct 1088 B |
+| 서명 | ML-DSA-65 (pure), context `"lib-sdls EP v1"`, 서명 3309 B |
+| 세션키 유도 | `K_TC = HKDF-SHA256(ikm=ss, salt=ct, info="lib-sdls SESS_TC v1", 32 B)`, `K_TM`은 info `"lib-sdls SESS_TM v1"` |
+
+공유 비밀, 세션키, 지상국 ML-DSA 비밀키는 라이브러리 밖으로 나오지 않습니다. ct는 공유메모리 SA DB에 보관되어(`EP_myGetPendingCiphertext`) 수신 프로세스가 만든 값을 송신 프로세스가 가져갑니다.
+
+## 10. 암호 계층 ([src/crypto/crypto_my.h](../src/crypto/crypto_my.h))
+
+```
+sdlp ─▶ sdls ─▶ sa, crypto        ep ─▶ sa, crypto
+crypto_registry.c : 알고리즘 ID(common_alg_e) → 구현
+crypto_wolfssl.c  : wolfCrypt 백엔드 (wolfSSL 헤더를 include하는 유일한 파일)
+```
+
+협력업체 구현으로 바꿀 때는 `crypto_wolfssl.c`와 같은 심볼(`CRYPTO_myBackend*`)을 정의하는 파일을 만들고 CMake `SDLS_CRYPTO_BACKEND`에 추가합니다. SDLS·EP 코드는 바뀌지 않습니다.
+
+## 11. 미구현 요약
 
 | 항목 | 영향 |
 |---|---|
-| Security Trailer(MAC)와 데이터 암호화 | SA01/SA11 프레임이 평문이고 인증되지 않음 |
-| ARSN 기록을 MAC 검증 뒤로 이동 | 지금은 위조 프레임으로 수신 윈도우를 밀 수 있음 |
+| EP PDU 바이트 형식 (태그, 길이, 필드 위치) | 위성과 합의 전. 지금은 호출자가 PDU를 만들고 `EP_mySign`으로 서명 |
+| StartSA의 TC 분할 | ct 1088 B + 서명 3309 B가 TC 프레임 하나(최대 패킷 989 B)에 들어가지 않음 |
+| ek 고정(pinning) 정책 | SA10은 인증이 없어 ek 바꿔치기 시 지상국 세션키 노출, TM 위조 가능 (위성 쪽 키는 서명으로 보호됨) |
 | GVCID 검사 | 채널 ID가 더미라 보류 |
-| SA의 `len_*`, `auth_mask_*`, `enc_alg` 사용 | 고정 길이 상수로 대신함 |
-| 키교환(ML-KEM/ML-DSA, EP PDU) | `SA_mySetKey`로 키를 직접 넣어 대신함 |
-| TM에서 패킷이 어느 SA로 왔는지 반환 | Python이 프레임 6-7 바이트를 직접 읽어야 함 |
 | TM OCF / Secondary Header / 패킷 분할, TC COP-1 | 범위 밖 |
 
 위성 쪽에서 맞춰야 할 것:
-- TC Security Header를 14 B로 반영
+- Security Trailer 16 B (TC 최대 패킷 989 B, TM 데이터 필드 끝 1770)
+- 위 5장의 AAD 규칙과 9장의 KDF·context 값
 - 수신 SA(SA01)의 마지막 수락 ARSN을 0에서 시작
