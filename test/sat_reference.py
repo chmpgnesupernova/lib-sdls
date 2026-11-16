@@ -4,6 +4,9 @@
 - SatTmFramer mirrors TM_SDLP_myInit / TM_SDLP_myForwardPacket / TM_SDLP_mySendFrame
   (TO side, TM send).
 
+The Security Header (SPI 2 + IV 12, big endian) follows the Primary Header in both
+directions. Frames carry no MAC yet, so the data field is plaintext.
+
 The ground side library must interoperate with this code byte for byte.
 """
 
@@ -70,13 +73,29 @@ def sat_tc_extract_packet(frame):
     return frame[data_offset : data_offset + packet_size]
 
 
+def tc_sechdr_fields(frame):
+    """Reads the Security Header that follows the TC primary header."""
+    start = b.TCTF_PRIHDR_LENGTH
+    return {
+        "spi": int.from_bytes(frame[start : start + b.SECHDR_SPI_LENGTH], "big"),
+        "iv": int.from_bytes(frame[start + b.SECHDR_SPI_LENGTH : start + b.SECHDR_LENGTH], "big"),
+    }
+
+
 # --- TM: satellite send side ---------------------------------------------------------
 
 
 class SatTmFramer:
-    """Mirrors the satellite TM_SDLP_my* functions. Sent frames collect in `sent`."""
+    """Mirrors the satellite TM_SDLP_my* functions. Sent frames collect in `sent`.
 
-    def __init__(self, scid=b.TM_DUMMY_SCID, vcid=b.TM_DUMMY_VCID, tfvn=b.TM_DUMMY_TFVN):
+    spi: SA written into every Security Header. SPI_SA10 (EP PDUs) zero fills the IV;
+    any other SA sends first_iv, first_iv + 1, ... (one per frame, like the satellite
+    SA11 send side).
+    """
+
+    def __init__(
+        self, scid=b.TM_DUMMY_SCID, vcid=b.TM_DUMMY_VCID, tfvn=b.TM_DUMMY_TFVN, spi=b.SPI_SA10, first_iv=1
+    ):
         # TM_SDLP_myInit
         self.data_field_offset = b.TMTF_PRIHDR_LENGTH + b.TM_SDLS_HDR_LENGTH
         self.data_field_length = b.TM_FRAME_SIZE - self.data_field_offset - b.TM_SDLS_TRL_LENGTH
@@ -85,6 +104,8 @@ class SatTmFramer:
         self.frame = bytearray(b.TM_FRAME_SIZE)
         self.current_data_offset = self.data_field_offset
         self.sent = []
+        self.spi = spi
+        self.next_iv = first_iv
 
         # TMTF_MY_WR_TF_VERSION / SCID / VCID / SEGLENGTHID / FIRSTHDRPTR(0)
         self.frame[0] = ((tfvn & 0x03) << 6) | ((scid >> 4) & 0x3F)
@@ -110,9 +131,21 @@ class SatTmFramer:
         self.current_data_offset += self.free_octets
         self.free_octets = 0
 
+    def _write_sechdr(self):
+        if self.spi == b.SPI_SA10:
+            iv = 0
+        else:
+            iv = self.next_iv
+            self.next_iv += 1
+        start = b.TMTF_PRIHDR_LENGTH
+        self.frame[start : start + b.SECHDR_LENGTH] = self.spi.to_bytes(
+            b.SECHDR_SPI_LENGTH, "big"
+        ) + iv.to_bytes(b.SECHDR_IV_LENGTH, "big")
+
     def _complete_frame(self):
         self.mc_frame_count = (self.mc_frame_count + 1) & 0xFF
         self.frame[2] = self.mc_frame_count
+        self._write_sechdr()
         self.free_octets = self.data_field_length
         self.current_data_offset = self.data_field_offset
 

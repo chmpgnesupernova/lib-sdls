@@ -10,6 +10,7 @@ import unittest
 
 import sdls_binding as b
 from sat_reference import SatTmFramer, make_spp
+from test_sa_shm import SaShmTestBase
 
 
 def data_of(total_packet_size, fill=0x5A):
@@ -17,10 +18,9 @@ def data_of(total_packet_size, fill=0x5A):
     return bytes([fill]) * (total_packet_size - 6)
 
 
-class TmExtractPacketTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.sdls = b.Sdls()
+class TmExtractPacketTest(SaShmTestBase):
+    """SaShmTestBase gives every test a fresh SA DB: SA10 Operational, SA11 Unkeyed.
+    SatTmFramer sends on SA10 unless a test picks another SPI."""
 
     def extract_raw(self, frame, cursor_value=0, frame_size=None):
         cursor = ctypes.c_size_t(cursor_value)
@@ -30,8 +30,8 @@ class TmExtractPacketTest(unittest.TestCase):
         return status, cursor.value, offset.value
 
     @staticmethod
-    def frames_for(packets):
-        framer = SatTmFramer()
+    def frames_for(packets, **framer_args):
+        framer = SatTmFramer(**framer_args)
         for packet in packets:
             framer.forward_packet(packet)
         framer.send_frame()
@@ -101,11 +101,87 @@ class TmExtractPacketTest(unittest.TestCase):
         framer.send_frame()
         self.assertEqual(self.sdls.tm_extract_packets(framer.sent[0]), [packet])
 
-    def test_security_header_area_is_skipped(self):
+    # --- Security Header --------------------------------------------------------------
+
+    def test_ep_sa_frames_ignore_the_iv(self):
         packet = make_spp(0x121, b"\x01\x02")
         frame = bytearray(self.frames_for([packet])[0])
-        frame[b.TMTF_PRIHDR_LENGTH : b.TM_DATA_OFFSET] = b"\xFF" * b.TM_SDLS_HDR_LENGTH
+        self.assertEqual(frame[b.TMTF_PRIHDR_LENGTH : b.TM_DATA_OFFSET], b"\xFF\xFF" + bytes(12))
+        frame[b.TMTF_PRIHDR_LENGTH + 2 : b.TM_DATA_OFFSET] = b"\xAB" * b.SECHDR_IV_LENGTH
         self.assertEqual(self.sdls.tm_extract_packets(bytes(frame)), [packet])
+        self.assertEqual(self.sdls.tm_extract_packets(bytes(frame)), [packet])  # no replay check
+
+    def test_session_sa_frames_from_the_first_iv(self):
+        """The satellite starts SA11 at IV 1; the ground must accept it after Rekey."""
+        self.bring_up_tm()
+        packets = [make_spp(0x122, data_of(b.TM_DATA_LENGTH, fill=i)) for i in range(5)]
+        frames = self.frames_for(packets, spi=b.SPI_SA11)
+        self.assertEqual(len(frames), 5)
+        extracted = [p for frame in frames for p in self.sdls.tm_extract_packets(frame)]
+        self.assertEqual(extracted, packets)
+        self.assertEqual(int.from_bytes(bytes(self.sdls.sa_get(b.SPI_SA11).iv), "big"), 5)
+
+    def test_replayed_session_frame_is_security_error(self):
+        self.bring_up_tm()
+        (frame,) = self.frames_for([make_spp(0x123, b"\x01")], spi=b.SPI_SA11)
+        self.sdls.tm_extract_packets(frame)
+        self.assertEqual(self.extract_raw(frame)[0], b.TM_SECURITY_ERROR)
+
+    def test_older_session_frame_is_security_error(self):
+        self.bring_up_tm()
+        frames = self.frames_for([make_spp(0x124, data_of(b.TM_DATA_LENGTH))] * 2, spi=b.SPI_SA11)
+        self.sdls.tm_extract_packets(frames[1])  # IV 2 first
+        self.assertEqual(self.extract_raw(frames[0])[0], b.TM_SECURITY_ERROR)
+
+    def test_session_frame_beyond_the_window_is_security_error(self):
+        self.bring_up_tm()
+        packet = make_spp(0x125, b"\x01")
+        (frame,) = self.frames_for([packet], spi=b.SPI_SA11, first_iv=65)
+        self.assertEqual(self.extract_raw(frame)[0], b.TM_SECURITY_ERROR)
+        (frame,) = self.frames_for([packet], spi=b.SPI_SA11, first_iv=64)
+        self.assertEqual(self.sdls.tm_extract_packets(frame), [packet])
+
+    def test_lost_frames_within_the_window_are_fine(self):
+        self.bring_up_tm()
+        packet = make_spp(0x126, b"\x01")
+        for first_iv in (1, 30, 31, 90):
+            with self.subTest(iv=first_iv):
+                (frame,) = self.frames_for([packet], spi=b.SPI_SA11, first_iv=first_iv)
+                self.assertEqual(self.sdls.tm_extract_packets(frame), [packet])
+
+    def test_sa_that_cannot_receive_is_security_error(self):
+        packet = make_spp(0x127, b"\x01")
+        cases = {
+            "SA11 Unkeyed": b.SPI_SA11,
+            "SA00 is TC": b.SPI_SA00,
+            "SA01 is TC": b.SPI_SA01,
+            "unknown SPI": 0x1234,
+        }
+        for name, spi in cases.items():
+            with self.subTest(name):
+                (frame,) = self.frames_for([packet], spi=spi)
+                self.assertEqual(self.extract_raw(frame)[0], b.TM_SECURITY_ERROR)
+
+    def test_refused_frame_does_not_move_the_arsn(self):
+        self.bring_up_tm()
+        frame = bytearray(self.frames_for([make_spp(0x128, b"\x01")], spi=b.SPI_SA11, first_iv=10)[0])
+        frame[4] &= 0xE7  # broken Primary Header: refused before the Security Header
+        self.assertEqual(self.extract_raw(bytes(frame))[0], b.TM_INVALID_HEADER)
+        self.assertEqual(int.from_bytes(bytes(self.sdls.sa_get(b.SPI_SA11).iv), "big"), 0)
+
+    def test_security_header_is_checked_once_per_frame(self):
+        """Only the cursor 0 call checks (and records) the header; later calls for the
+        same frame continue without a replay error."""
+        self.bring_up_tm()
+        packets = [make_spp(0x129, b"\xAA" * 9), make_spp(0x12A, b"\xBB" * 19)]
+        (frame,) = self.frames_for(packets, spi=b.SPI_SA11)
+        self.assertEqual(self.sdls.tm_extract_packets(frame), packets)
+
+    def test_wrapper_raises_security_error(self):
+        (frame,) = self.frames_for([make_spp(0x12B, b"\x01")], spi=b.SPI_SA11)
+        with self.assertRaises(b.SdlsError) as ctx:
+            self.sdls.tm_extract_packets(frame)
+        self.assertEqual(ctx.exception.code, b.TM_SECURITY_ERROR)
 
     # --- error codes -----------------------------------------------------------------
 

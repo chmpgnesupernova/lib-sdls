@@ -4,7 +4,7 @@
  *
  * 부팅 시 이 값을 각 노드의 SA DB로 복사해서 쓴다 (const 원본은 수정하지 않는다).
  */
-#include "pqc_struct.h"
+#include "sa/sa_my.h"
 
 /* TC Primary Header 5 B 전체 인증 (설계 결정: AAD에 헤더 포함) */
 #define TC_MASK  { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 }

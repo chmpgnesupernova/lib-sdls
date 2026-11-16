@@ -17,7 +17,7 @@ TCTF_PRIHDR_LENGTH = 5
 TCTF_MAX_FRAME_LENGTH = 1024
 TC_SPP_HDR_LENGTH = 6
 TC_SPP_MIN_LENGTH = 7
-TC_SDLS_HDR_LENGTH = 0
+TC_SDLS_HDR_LENGTH = 14  # Security Header: SPI 2 + IV 12
 TC_SDLS_TRL_LENGTH = 0
 TC_FECF_LENGTH = 0
 TC_MAX_PACKET_LENGTH = (
@@ -33,6 +33,7 @@ TC_SUCCESS = 0
 TC_INVALID_ARGUMENT = -2
 TC_INVALID_LENGTH = -3
 TC_INVALID_PACKET = -4
+TC_SECURITY_ERROR = -6
 TC_BUFFER_TOO_SMALL = -7
 TC_NOT_INITIALIZED = -8
 
@@ -40,6 +41,7 @@ TC_ERROR_NAMES = {
     TC_INVALID_ARGUMENT: "TC_SDLP_MY_INVALID_ARGUMENT",
     TC_INVALID_LENGTH: "TC_SDLP_MY_INVALID_LENGTH",
     TC_INVALID_PACKET: "TC_SDLP_MY_INVALID_PACKET",
+    TC_SECURITY_ERROR: "TC_SDLP_MY_SECURITY_ERROR",
     TC_BUFFER_TOO_SMALL: "TC_SDLP_MY_BUFFER_TOO_SMALL",
     TC_NOT_INITIALIZED: "TC_SDLP_MY_NOT_INITIALIZED",
 }
@@ -65,13 +67,100 @@ TM_INVALID_ARGUMENT = -2
 TM_INVALID_LENGTH = -3
 TM_INVALID_PACKET = -4
 TM_INVALID_HEADER = -5
+TM_SECURITY_ERROR = -6
 
 TM_ERROR_NAMES = {
     TM_INVALID_ARGUMENT: "TM_SDLP_MY_INVALID_ARGUMENT",
     TM_INVALID_LENGTH: "TM_SDLP_MY_INVALID_LENGTH",
     TM_INVALID_PACKET: "TM_SDLP_MY_INVALID_PACKET",
     TM_INVALID_HEADER: "TM_SDLP_MY_INVALID_HEADER",
+    TM_SECURITY_ERROR: "TM_SDLP_MY_SECURITY_ERROR",
 }
+
+# SA / Key DB in shared memory (include/sa/sa_shm_my.h, include/sa/sa_my.h)
+SA_SHM_DEFAULT_NAME = "/sdls_sa_db"
+
+SPI_SA00 = 0x0000  # PQC key exchange, TC
+SPI_SA01 = 0x0001  # session, TC (ground sends)
+SPI_SA10 = 0xFFFF  # PQC key exchange, TM
+SPI_SA11 = 0x0002  # session, TM (ground receives)
+
+KEYID_SESS_TC = 0x0080
+KEYID_SESS_TM = 0x0081
+KEYID_NONE = 0xFFFF
+AES256_KEY_LEN = 32
+GCM_IV_LEN = 12
+
+SA_STATE_NULL = 0
+SA_STATE_UNKEYED = 1
+SA_STATE_KEYED = 2
+SA_STATE_OPERATIONAL = 3
+
+PID_CREATE_SA = 0x1
+PID_DELETE_SA = 0x4
+PID_REKEY_SA = 0x6
+PID_EXPIRE_SA = 0x9
+PID_START_SA = 0xB
+PID_STOP_SA = 0xE
+
+SA_SUCCESS = 0
+SA_INVALID_ARGUMENT = -2
+SA_NOT_OPEN = -8
+SA_SHM_ERROR = -9
+SA_LAYOUT_MISMATCH = -10
+SA_LOCK_ERROR = -11
+SA_UNKNOWN_SPI = -12
+SA_INVALID_STATE = -13
+SA_UNKNOWN_KEY = -14
+SA_KEY_IN_USE = -15
+SA_IV_EXHAUSTED = -16
+SA_REPLAY = -17
+
+SA_ERROR_NAMES = {
+    SA_INVALID_ARGUMENT: "SA_MY_INVALID_ARGUMENT",
+    SA_NOT_OPEN: "SA_MY_NOT_OPEN",
+    SA_SHM_ERROR: "SA_MY_SHM_ERROR",
+    SA_LAYOUT_MISMATCH: "SA_MY_LAYOUT_MISMATCH",
+    SA_LOCK_ERROR: "SA_MY_LOCK_ERROR",
+    SA_UNKNOWN_SPI: "SA_MY_UNKNOWN_SPI",
+    SA_INVALID_STATE: "SA_MY_INVALID_STATE",
+    SA_UNKNOWN_KEY: "SA_MY_UNKNOWN_KEY",
+    SA_KEY_IN_USE: "SA_MY_KEY_IN_USE",
+    SA_IV_EXHAUSTED: "SA_MY_IV_EXHAUSTED",
+    SA_REPLAY: "SA_MY_REPLAY",
+}
+
+
+# SDLS Security Header (include/sdls/sechdr_my.h): SPI 2 + IV 12, big endian
+SECHDR_SPI_LENGTH = 2
+SECHDR_IV_LENGTH = 12
+SECHDR_LENGTH = SECHDR_SPI_LENGTH + SECHDR_IV_LENGTH
+
+
+class CommonSa(ctypes.Structure):
+    """Mirror of common_sa_t (include/sa/sa_my.h). ctypes applies the same natural
+    alignment as the C compiler; Sdls() checks the size against SA_mySaSize()."""
+
+    _fields_ = [
+        ("spi", ctypes.c_uint16),
+        ("dir", ctypes.c_uint8),
+        ("gvcid", ctypes.c_uint32),
+        ("service_type", ctypes.c_uint8),
+        ("len_iv", ctypes.c_uint8),
+        ("len_sn", ctypes.c_uint8),
+        ("len_pl", ctypes.c_uint8),
+        ("len_mac", ctypes.c_uint8),
+        ("auth_alg", ctypes.c_uint8),
+        ("enc_alg", ctypes.c_uint8),
+        ("auth_mask_prihdr", ctypes.c_uint8 * 6),
+        ("auth_mask_len", ctypes.c_uint8),
+        ("arsn_window", ctypes.c_uint32),
+        ("auth_key_id", ctypes.c_uint16),
+        ("enc_key_id", ctypes.c_uint16),
+        ("iv", ctypes.c_uint8 * GCM_IV_LEN),
+        ("state", ctypes.c_uint8),
+        ("last_pid", ctypes.c_uint8),
+    ]
 
 # --- Library loading ------------------------------------------------------------------
 
@@ -116,7 +205,7 @@ class Sdls:
         lib.TC_SDLP_myInit.argtypes = []
         lib.TC_SDLP_myInit.restype = ctypes.c_int32
 
-        lib.TC_SDLP_myBuildFrame.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+        lib.TC_SDLP_myBuildFrame.argtypes = [ctypes.c_uint16, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
         lib.TC_SDLP_myBuildFrame.restype = ctypes.c_int32
 
         lib.TM_SDLP_myExtractPacket.argtypes = [
@@ -127,6 +216,31 @@ class Sdls:
         ]
         lib.TM_SDLP_myExtractPacket.restype = ctypes.c_int32
 
+        u16, i32, p = ctypes.c_uint16, ctypes.c_int32, ctypes.c_void_p
+        for name, argtypes in (
+            ("SA_myOpen", [ctypes.c_char_p]),
+            ("SA_myClose", []),
+            ("SA_myUnlink", [ctypes.c_char_p]),
+            ("SA_myGetSa", [u16, ctypes.POINTER(CommonSa)]),
+            ("SA_myRekey", [u16, u16]),
+            ("SA_myStart", [u16]),
+            ("SA_myStop", [u16]),
+            ("SA_myExpire", [u16]),
+            ("SA_mySetKey", [u16, p, ctypes.c_size_t]),
+            ("SA_myNextIv", [u16, p]),
+            ("SA_myCheckArsn", [u16, p]),
+            ("SA_myCommitArsn", [u16, p]),
+            ("SECHDR_myApplyTc", [u16, p, ctypes.c_size_t, p]),
+            ("SECHDR_myProcessTm", [p, ctypes.c_size_t, ctypes.POINTER(u16), p]),
+        ):
+            func = getattr(lib, name)
+            func.argtypes = argtypes
+            func.restype = i32
+        lib.SA_mySaSize.argtypes = []
+        lib.SA_mySaSize.restype = ctypes.c_size_t
+        if lib.SA_mySaSize() != ctypes.sizeof(CommonSa):
+            raise RuntimeError("CommonSa does not match common_sa_t; update sdls_binding.py")
+
         self.lib = lib
 
     def tc_init(self):
@@ -134,17 +248,18 @@ class Sdls:
         if status != TC_SUCCESS:
             raise SdlsError("TC_SDLP_myInit", status, TC_ERROR_NAMES)
 
-    def tc_build_frame(self, packet):
-        """Wraps one Space Packet into a TC frame and returns the frame bytes."""
+    def tc_build_frame(self, spi, packet):
+        """Wraps one Space Packet into a TC frame on the SA spi and returns the frame
+        bytes. Needs sa_open() first. SPI_SA00 for EP PDUs, SPI_SA01 for session traffic."""
         packet = bytes(packet)
         buf = ctypes.create_string_buffer(TCTF_MAX_FRAME_LENGTH)
-        status = self.lib.TC_SDLP_myBuildFrame(packet, len(packet), buf, len(buf))
+        status = self.lib.TC_SDLP_myBuildFrame(spi, packet, len(packet), buf, len(buf))
         if status < 0:
             raise SdlsError("TC_SDLP_myBuildFrame", status, TC_ERROR_NAMES)
         return buf.raw[:status]
 
     def tm_extract_packets(self, frame):
-        """Returns every Space Packet in one TM frame, in order."""
+        """Returns every Space Packet in one TM frame, in order. Needs sa_open() first."""
         frame = bytes(frame)
         cursor = ctypes.c_size_t(0)
         offset = ctypes.c_size_t(0)
@@ -156,3 +271,77 @@ class Sdls:
             if status == 0:
                 return packets
             packets.append(frame[offset.value : offset.value + status])
+
+    # --- SA / Key DB (shared memory) -------------------------------------------------
+    # The sender and receiver processes both call sa_open() with the same name and then
+    # see one SA DB. State changes made by one process are visible to the other at once.
+
+    def _sa_call(self, name, *args):
+        status = getattr(self.lib, name)(*args)
+        if status != SA_SUCCESS:
+            raise SdlsError(name, status, SA_ERROR_NAMES)
+
+    @staticmethod
+    def _shm_name(name):
+        return None if name is None else name.encode()
+
+    def sa_open(self, name=None):
+        """Creates or attaches the shared SA DB (default SA_SHM_DEFAULT_NAME)."""
+        self._sa_call("SA_myOpen", self._shm_name(name))
+
+    def sa_close(self):
+        self._sa_call("SA_myClose")
+
+    def sa_unlink(self, name=None):
+        """Removes the segment; the next sa_open() starts again from the defaults."""
+        self._sa_call("SA_myUnlink", self._shm_name(name))
+
+    def sa_get(self, spi):
+        sa = CommonSa()
+        self._sa_call("SA_myGetSa", spi, ctypes.byref(sa))
+        return sa
+
+    def sa_rekey(self, spi, key_id):
+        self._sa_call("SA_myRekey", spi, key_id)
+
+    def sa_start(self, spi):
+        self._sa_call("SA_myStart", spi)
+
+    def sa_stop(self, spi):
+        self._sa_call("SA_myStop", spi)
+
+    def sa_expire(self, spi):
+        self._sa_call("SA_myExpire", spi)
+
+    def sa_set_key(self, key_id, key):
+        key = bytes(key)
+        self._sa_call("SA_mySetKey", key_id, key, len(key))
+
+    def sa_next_iv(self, spi):
+        iv = ctypes.create_string_buffer(GCM_IV_LEN)
+        self._sa_call("SA_myNextIv", spi, iv)
+        return iv.raw
+
+    def sa_check_arsn(self, spi, iv):
+        self._sa_call("SA_myCheckArsn", spi, bytes(iv))
+
+    def sa_commit_arsn(self, spi, iv):
+        self._sa_call("SA_myCommitArsn", spi, bytes(iv))
+
+    # --- SDLS Security Header ---------------------------------------------------------
+    # Return codes are SA_MY_* codes.
+
+    def sechdr_apply_tc(self, spi):
+        """Builds the TC Security Header for one frame. Returns (header bytes, iv)."""
+        hdr = ctypes.create_string_buffer(SECHDR_LENGTH)
+        iv = ctypes.create_string_buffer(SECHDR_IV_LENGTH)
+        self._sa_call("SECHDR_myApplyTc", spi, hdr, len(hdr), iv)
+        return hdr.raw, iv.raw
+
+    def sechdr_process_tm(self, hdr):
+        """Checks a TM Security Header. Returns (spi, iv); the ARSN is not committed."""
+        hdr = bytes(hdr)
+        spi = ctypes.c_uint16()
+        iv = ctypes.create_string_buffer(SECHDR_IV_LENGTH)
+        self._sa_call("SECHDR_myProcessTm", hdr, len(hdr), ctypes.byref(spi), iv)
+        return spi.value, iv.raw

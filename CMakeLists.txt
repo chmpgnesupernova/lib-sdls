@@ -4,9 +4,21 @@ project(lib_sdls VERSION 0.1.0 LANGUAGES C)
 # Ground side SDLP library, loaded by the Python ground system through ctypes.
 add_library(sdls SHARED
   src/sdlp/tc_sdlp_my.c
-  src/sdlp/tm_sdlp_my.c)
+  src/sdlp/tm_sdlp_my.c
+  src/sa/sa_default.c
+  src/sa/sa_shm_my.c
+  src/sdls/sechdr_my.c)
 
 target_include_directories(sdls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# SA/Key DB in POSIX shared memory: process-shared mutex (pthread), shm_open (librt on
+# glibc older than 2.34; newer glibc has it in libc and librt is an empty stub).
+find_package(Threads REQUIRED)
+find_library(RT_LIBRARY rt)
+target_link_libraries(sdls PRIVATE Threads::Threads)
+if(RT_LIBRARY)
+  target_link_libraries(sdls PRIVATE ${RT_LIBRARY})
+endif()
 
 set_target_properties(sdls PROPERTIES
   C_STANDARD 99

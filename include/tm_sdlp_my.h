@@ -8,15 +8,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sdls/sechdr_my.h"
 #include "tf/tmtf_my.h"
-// #include "crypto.h"
 
 #define TM_SDLP_MY_SUCCESS          (0)
 #define TM_SDLP_MY_INVALID_ARGUMENT (-2)
 #define TM_SDLP_MY_INVALID_LENGTH   (-3)
 #define TM_SDLP_MY_INVALID_PACKET   (-4)
 #define TM_SDLP_MY_INVALID_HEADER   (-5)
-// #define TM_SDLP_MY_SECURITY_ERROR  (-6)
+#define TM_SDLP_MY_SECURITY_ERROR   (-6) /* Security Header refused (SPI, SA state, replay) */
 
 /* Fixed dummy channel IDs written into the premade frame header by the SAT side. */
 #define TM_SDLP_MY_DUMMY_TFVN 0
@@ -25,9 +25,9 @@
 
 #define TM_SDLP_MY_FRAME_SIZE 1786
 
-/* Fixed SDLS layout: SPI 2 + IV 12 bytes and no trailer.
- * The area stays reserved and zeroed while encryption is disabled. */
-#define TM_SDLP_MY_SDLS_HDR_LENGTH 14
+/* SDLS Security Header right after the Primary Header: SPI 2 + IV 12 bytes.
+ * No Security Trailer yet: frames are neither decrypted nor MAC checked. */
+#define TM_SDLP_MY_SDLS_HDR_LENGTH SECHDR_MY_LENGTH
 #define TM_SDLP_MY_SDLS_TRL_LENGTH 0
 
 /* Data field position inside the frame. */
@@ -58,10 +58,18 @@
  * pFrame        : received frame
  * frameSize     : size of pFrame in bytes (must be TM_SDLP_MY_FRAME_SIZE)
  * pCursor       : in/out. Set to 0 before the first call for a frame; the frame
- *                 header is checked on that call. Advanced past the returned packet.
+ *                 frame header and the Security Header are checked on that call.
+ *                 Advanced past the returned packet.
  * pPacketOffset : out. Offset of the returned packet from the frame start.
  * Returns the packet size (> 0), 0 when the frame has no more packets
  * (the idle packet or the data field end was reached), or a negative error code.
+ *
+ * Needs SA_myOpen (sa/sa_shm_my.h) in this process first. The Security Header SPI
+ * must name an Operational TM SA: SA10 (EP PDUs, IV ignored) or SA11 (session, IV must
+ * be a new ARSN within the window). An accepted SA11 ARSN is recorded at once, so the
+ * same frame passed again with cursor 0 is refused as a replay.
+ * TM_SDLP_MY_SECURITY_ERROR: SECHDR_myProcessTm refused the header, or the SA DB is
+ * not open.
  *
  * Python (ctypes) usage:
  *   cursor, off = c_size_t(0), c_size_t(0)

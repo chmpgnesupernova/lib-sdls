@@ -6,6 +6,9 @@
 static int32_t TM_SDLP_myCheckFrame(const uint8_t *pFrame, size_t frameSize)
 {
     const TMTF_my_PriHdr_t *pHdr = (const TMTF_my_PriHdr_t *)pFrame;
+    uint8_t                 iv[SECHDR_MY_IV_LENGTH];
+    common_sa_t             sa;
+    uint16_t                spi;
 
     /* The SAT side always sends the whole fixed size frame. */
     if (frameSize != TM_SDLP_MY_FRAME_SIZE)
@@ -27,13 +30,22 @@ static int32_t TM_SDLP_myCheckFrame(const uint8_t *pFrame, size_t frameSize)
         return TM_SDLP_MY_INVALID_HEADER;
     }
 
-    /* SDLS is disabled: the zeroed Security Header is skipped unchecked.
-     * Later the SA is found by SPI and the frame is decrypted here. */
-    // iStatus = Crypto_TM_ProcessSecurity(...);
-    // if (iStatus != CRYPTO_LIB_SUCCESS)
-    // {
-    //     return TM_SDLP_MY_SECURITY_ERROR;
-    // }
+    /* Security Header: SPI names an Operational TM SA, and a session SA's IV is a new
+     * ARSN within the window. GVCID is not matched against the SA (dummy channel IDs). */
+    if (SECHDR_myProcessTm(pFrame + TMTF_MY_PRIHDR_LENGTH, frameSize - TMTF_MY_PRIHDR_LENGTH, &spi, iv) !=
+            SA_MY_SUCCESS ||
+        SA_myGetSa(spi, &sa) != SA_MY_SUCCESS)
+    {
+        return TM_SDLP_MY_SECURITY_ERROR;
+    }
+
+    /* Record the ARSN. There is no MAC check yet, so the header check is the last
+     * step; once decryption is added this moves after the MAC verifies (§4.2.3),
+     * so a forged frame can never advance the window. */
+    if ((sa.service_type != COMMON_SVC_NONE) && (SA_myCommitArsn(spi, iv) != SA_MY_SUCCESS))
+    {
+        return TM_SDLP_MY_SECURITY_ERROR;
+    }
 
     return TM_SDLP_MY_SUCCESS;
 }

@@ -19,8 +19,8 @@ int32_t TC_SDLP_myInit(void)
 {
     TC_SDLP_myFrameInfo_t *pFrameInfo = &TC_SDLP_myFrameInfo;
 
-    /* SDLS is disabled, so fixed lengths replace the SA lookup.
-     * Later the Security Header/Trailer lengths come from the SA here. */
+    /* Every SA uses the same fixed Security Header (SPI 2 + IV 12), so the layout
+     * does not depend on the SA. */
     pFrameInfo->dataFieldOffset = TCTF_MY_PRIHDR_LENGTH + TC_SDLP_MY_SDLS_HDR_LENGTH;
     pFrameInfo->maxPacketSize   = TC_SDLP_MY_MAX_PACKET_LENGTH;
     pFrameInfo->frameSeqNum     = 0;
@@ -29,7 +29,7 @@ int32_t TC_SDLP_myInit(void)
     return TC_SDLP_MY_SUCCESS;
 }
 
-int32_t TC_SDLP_myBuildFrame(const void *pPacket, size_t packetSize, void *pBuf, size_t bufSize)
+int32_t TC_SDLP_myBuildFrame(uint16_t spi, const void *pPacket, size_t packetSize, void *pBuf, size_t bufSize)
 {
     TC_SDLP_myFrameInfo_t *pFrameInfo = &TC_SDLP_myFrameInfo;
     const uint8_t         *pSpp       = (const uint8_t *)pPacket;
@@ -78,19 +78,20 @@ int32_t TC_SDLP_myBuildFrame(const void *pPacket, size_t packetSize, void *pBuf,
     TCTF_MY_WR_FRAMELEN(*pHdr, frameSize - 1);
     TCTF_MY_WR_SEQNUM(*pHdr, pFrameInfo->frameSeqNum);
 
-    /* SDLS is disabled: the Security Header area (0 bytes now) stays zeroed. */
+    /* Security Header: SPI and a fresh IV from the SA. Done after every other check,
+     * so a frame that is refused anyway never consumes an IV. */
+    if (SECHDR_myApplyTc(spi, pFrame + TCTF_MY_PRIHDR_LENGTH, bufSize - TCTF_MY_PRIHDR_LENGTH, NULL) !=
+        SA_MY_SUCCESS)
+    {
+        return TC_SDLP_MY_SECURITY_ERROR;
+    }
 
     /* The data field holds exactly one Space Packet. */
     memcpy(pFrame + pFrameInfo->dataFieldOffset, pSpp, packetSize);
 
-    /* SDLS is disabled: the Security Trailer area (0 bytes now) stays zeroed.
-     * Later the SA adds the Security Header/Trailer and the MAC here. */
+    /* Security Trailer (0 bytes now). Later the data field is encrypted and the MAC is
+     * computed here with the IV written above. */
     memset(pFrame + pFrameInfo->dataFieldOffset + packetSize, 0, TC_SDLP_MY_SDLS_TRL_LENGTH);
-    // iStatus = Crypto_TC_ApplySecurity(...);
-    // if (iStatus != CRYPTO_LIB_SUCCESS)
-    // {
-    //     return TC_SDLP_MY_SECURITY_ERROR;
-    // }
 
     /* The optional FECF is not used, so no CRC is appended. */
 
