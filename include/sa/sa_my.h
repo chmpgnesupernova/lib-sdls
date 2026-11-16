@@ -203,8 +203,8 @@ typedef struct {
 
     /*
      * 인증 마스크 (§4.2.2.6.2) — TF Primary Header 부분만 저장한다.
-     * 표준 규칙상 Security Header의 SPI(h)와 Frame Data(i)는 항상 1이고,
-     * IV는 GCM nonce로 별도 입력되므로 고정 규칙으로 처리한다.
+     * Security Header(SPI + IV)는 전체를 항상 인증하고(AAD에 그대로 포함, IV는 GCM nonce
+     * 로도 입력), Frame Data는 GCM 암호문으로 인증하므로 고정 규칙으로 처리한다.
      * TM은 MC Frame Count(오프셋 2) 바이트가 반드시 0 (d).
      */
     uint8_t  auth_mask_prihdr[COMMON_PRIHDR_MAX_LEN];

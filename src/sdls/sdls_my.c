@@ -11,7 +11,7 @@
 #include "../crypto/crypto_my.h"
 #include "../sa/sa_shm_internal.h"
 
-/* AAD upper bound: masked Primary Header + SPI + (AUTH only) the TM Frame Data. */
+/* AAD upper bound: masked Primary Header + Security Header + (AUTH only) the TM Frame Data. */
 #define SDLS_MY_AAD_MAX 2048
 
 /* Checks that the SA's protection is something this build can do and finds the AEAD.
@@ -57,7 +57,7 @@ static int32_t SDLS_myResolve(const common_sa_t *pSa, size_t priHdrLen, const CR
     return SA_MY_SUCCESS;
 }
 
-/* AAD = (Primary Header AND mask) || SPI [|| Frame Data for AUTH]. */
+/* AAD = (Primary Header AND mask) || Security Header (SPI + IV) [|| Frame Data for AUTH]. */
 static size_t SDLS_myBuildAad(const common_sa_t *pSa, const uint8_t *pFrame, size_t priHdrLen, const uint8_t *pData,
                               size_t dataLen, uint8_t *pAad)
 {
@@ -68,8 +68,11 @@ static size_t SDLS_myBuildAad(const common_sa_t *pSa, const uint8_t *pFrame, siz
     {
         pAad[len++] = pFrame[i] & pSa->auth_mask_prihdr[i];
     }
-    memcpy(&pAad[len], pFrame + priHdrLen, SECHDR_MY_SPI_LENGTH); /* SPI, as on the wire */
-    len += SECHDR_MY_SPI_LENGTH;
+    /* The whole Security Header as on the wire: SPI and IV. The IV is also the GCM nonce,
+     * so authenticating it again adds no strength, but it keeps the rule "every header
+     * byte except the masked ones is authenticated" simple to state and to match. */
+    memcpy(&pAad[len], pFrame + priHdrLen, SECHDR_MY_LENGTH);
+    len += SECHDR_MY_LENGTH;
 
     if (pSa->service_type == COMMON_SVC_AUTH)
     {
@@ -94,7 +97,7 @@ int32_t SDLS_myApplySecurityTc(uint16_t spi, void *pFrame, size_t priHdrLen, siz
     int32_t                 rc;
 
     if ((pFrame == NULL) || (priHdrLen == 0) || (priHdrLen > COMMON_PRIHDR_MAX_LEN) ||
-        (dataLen > SDLS_MY_AAD_MAX - COMMON_PRIHDR_MAX_LEN - SECHDR_MY_SPI_LENGTH) ||
+        (dataLen > SDLS_MY_AAD_MAX - COMMON_PRIHDR_MAX_LEN - SECHDR_MY_LENGTH) ||
         (bufSize < priHdrLen + SECHDR_MY_LENGTH + dataLen + SDLS_MY_TRAILER_LENGTH))
     {
         return SA_MY_INVALID_ARGUMENT;
@@ -179,7 +182,7 @@ int32_t SDLS_myProcessSecurityTm(void *pFrame, size_t frameSize, size_t priHdrLe
         return SA_MY_INVALID_ARGUMENT;
     }
     dataLen = frameSize - priHdrLen - SECHDR_MY_LENGTH - SDLS_MY_TRAILER_LENGTH;
-    if (dataLen > SDLS_MY_AAD_MAX - COMMON_PRIHDR_MAX_LEN - SECHDR_MY_SPI_LENGTH)
+    if (dataLen > SDLS_MY_AAD_MAX - COMMON_PRIHDR_MAX_LEN - SECHDR_MY_LENGTH)
     {
         return SA_MY_INVALID_ARGUMENT;
     }

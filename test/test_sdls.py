@@ -1,7 +1,7 @@
 """SDLS frame protection tests (SDLS_myApplySecurityTc / SDLS_myProcessSecurityTm).
 
 Session SAs use AES-256-GCM with
-    AAD = (Primary Header AND mask) || SPI,   nonce = IV,   MAC = 16 byte tag.
+    AAD = (Primary Header AND mask) || Security Header (SPI + IV),   nonce = IV,   MAC = 16 byte tag.
 The satellite side (sat_reference) builds the AAD on its own from that rule, so every
 round trip here also checks that both ends agree on the AAD byte for byte.
 """
@@ -13,10 +13,12 @@ import sdls_binding as b
 from sat_reference import (
     TC_AUTH_MASK,
     TM_AUTH_MASK,
+    SatAuthFail,
     SatTcDrop,
     SatTmFramer,
     make_spp,
     masked,
+    sat_crypto,
     sat_tc_extract_packet,
 )
 from test_sa_shm import KEY_A, KEY_B, SaShmTestBase
@@ -88,6 +90,19 @@ class TcProtectionTest(SaShmTestBase):
             with self.subTest(name):
                 with self.assertRaises(SatTcDrop):
                     sat_tc_extract_packet(flip(frame, index, 0x04), tc_key=KEY_A)
+
+    def test_aad_covers_the_whole_security_header(self):
+        """The agreed AAD is (PriHdr AND mask) || SPI || IV. An AAD without the IV (the
+        earlier rule) must not verify, so both ends are pinned to the same rule."""
+        frame = self.build()
+        hdr_end = b.TCTF_PRIHDR_LENGTH
+        iv = frame[hdr_end + 2 : TC_DATA]
+        full = masked(frame[:hdr_end], TC_AUTH_MASK) + frame[hdr_end:TC_DATA]
+        self.assertEqual(len(full), 19)
+        crypto = sat_crypto()
+        self.assertEqual(crypto.gcm_decrypt(KEY_A, iv, full, frame[TC_DATA:-TRL], frame[-TRL:]), self.packet)
+        with self.assertRaises(SatAuthFail):
+            crypto.gcm_decrypt(KEY_A, iv, full[: hdr_end + 2], frame[TC_DATA:-TRL], frame[-TRL:])
 
     def test_satellite_with_another_key_refuses(self):
         with self.assertRaises(SatTcDrop):
@@ -194,7 +209,7 @@ class IndependentAesGcmTest(SaShmTestBase):
         packet = make_spp(0x18, b"independent check")
         frame = self.sdls.tc_build_frame(b.SPI_SA01, packet)
         hdr_end = b.TCTF_PRIHDR_LENGTH
-        aad = masked(frame[:hdr_end], TC_AUTH_MASK) + frame[hdr_end : hdr_end + 2]
+        aad = masked(frame[:hdr_end], TC_AUTH_MASK) + frame[hdr_end : hdr_end + b.SECHDR_LENGTH]
         iv = frame[hdr_end + 2 : hdr_end + b.SECHDR_LENGTH]
         self.assertEqual(AESGCM(KEY_A).decrypt(iv, frame[TC_DATA:], aad), packet)
 
@@ -203,7 +218,7 @@ class IndependentAesGcmTest(SaShmTestBase):
         packets = [make_spp(0x200, b"from cryptography")]
         frame = bytearray(tm_frame(packets, spi=b.SPI_SA11, key=None, first_iv=3))  # clear data, zero MAC
         hdr_end = b.TMTF_PRIHDR_LENGTH
-        aad = masked(frame[:hdr_end], TM_AUTH_MASK) + frame[hdr_end : hdr_end + 2]
+        aad = masked(frame[:hdr_end], TM_AUTH_MASK) + bytes(frame[hdr_end : hdr_end + b.SECHDR_LENGTH])
         iv = bytes(frame[hdr_end + 2 : hdr_end + b.SECHDR_LENGTH])
         sealed = AESGCM(KEY_B).encrypt(iv, bytes(frame[TM_DATA : b.TM_DATA_END]), aad)
         frame[TM_DATA:] = sealed  # ciphertext || tag

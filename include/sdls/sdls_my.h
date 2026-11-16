@@ -11,10 +11,11 @@
  * and which algorithm does it by the SA's enc_alg / auth_alg (crypto registry).
  *
  * Additional Authenticated Data (must match the satellite byte for byte):
- *   AAD = (Primary Header AND auth_mask_prihdr) || SPI            (AUTH_ENC)
- *   AAD = (Primary Header AND auth_mask_prihdr) || SPI || Frame Data   (AUTH)
- * The IV is not in the AAD: it is the GCM nonce. TC masks nothing (5 bytes), TM masks
- * the MC Frame Count (byte 2), per the SA defaults.
+ *   AAD = (Primary Header AND auth_mask_prihdr) || Security Header              (AUTH_ENC)
+ *   AAD = (Primary Header AND auth_mask_prihdr) || Security Header || Frame Data (AUTH)
+ * Security Header = SPI 2 + IV 12, as on the wire. The IV is also the GCM nonce.
+ * TC masks nothing (5 bytes), TM masks the MC Frame Count (byte 2), per the SA defaults.
+ * So every header byte is authenticated except the TM MC Frame Count.
  *
  * Return codes: SA_MY_* (sa/sa_shm_my.h) or the SDLS_MY_* codes below.
  */

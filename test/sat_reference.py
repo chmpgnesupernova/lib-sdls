@@ -8,7 +8,7 @@ The Security Header (SPI 2 + IV 12, big endian) follows the Primary Header and t
 Security Trailer (16 byte MAC) ends the frame, in both directions. Session SAs (SA01 TC,
 SA11 TM) encrypt the data field with AES-256-GCM:
 
-    AAD = (Primary Header AND mask) || SPI      nonce = IV      MAC = GCM tag
+    AAD = (Primary Header AND mask) || Security Header (SPI + IV)   nonce = IV   MAC = GCM tag
     TC mask: all 5 bytes      TM mask: all 6 bytes except the MC Frame Count (byte 2)
 
 EP SAs (SA00, SA10) zero fill the IV and the MAC. The frame layout and the AAD rule here
@@ -173,7 +173,8 @@ def sat_tc_extract_packet(frame, tc_key=None):
     if sec["spi"] == b.SPI_SA01:
         if tc_key is None:
             raise SatTcDrop("session frame but no TC key")
-        aad = masked(frame[: b.TCTF_PRIHDR_LENGTH], TC_AUTH_MASK) + sec["spi"].to_bytes(2, "big")
+        hdr_end = b.TCTF_PRIHDR_LENGTH
+        aad = masked(frame[:hdr_end], TC_AUTH_MASK) + frame[hdr_end : hdr_end + b.SECHDR_LENGTH]
         tag = frame[data_offset + packet_size : data_offset + packet_size + b.TC_SDLS_TRL_LENGTH]
         try:
             data = sat_crypto().gcm_decrypt(tc_key, sec["iv"].to_bytes(12, "big"), aad, data, tag)
@@ -272,7 +273,8 @@ class SatTmFramer:
         if self.spi == b.SPI_SA10 or self.key is None:
             self.frame[end:] = bytes(b.TM_SDLS_TRL_LENGTH)
             return
-        aad = masked(self.frame[: b.TMTF_PRIHDR_LENGTH], TM_AUTH_MASK) + self.spi.to_bytes(2, "big")
+        hdr_end = b.TMTF_PRIHDR_LENGTH
+        aad = masked(self.frame[:hdr_end], TM_AUTH_MASK) + bytes(self.frame[hdr_end : hdr_end + b.SECHDR_LENGTH])
         ct, tag = sat_crypto().gcm_encrypt(
             self.key, iv.to_bytes(12, "big"), aad, self.frame[self.data_field_offset : end]
         )

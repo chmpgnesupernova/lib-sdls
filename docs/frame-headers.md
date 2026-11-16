@@ -158,12 +158,14 @@ GVCID(TFVN·SCID·VCID)와 SA의 `gvcid`가 일치하는지는 검사하지 않�
 **위성과 바이트 단위로 같아야 하는 규칙 (AAD)**
 
 ```
-AAD   = (Primary Header AND auth_mask_prihdr) || SPI(2 B, 프레임에 적힌 그대로)
+AAD   = (Primary Header AND auth_mask_prihdr) || Security Header(SPI 2 B + IV 12 B, 프레임에 적힌 그대로)
 nonce = Security Header의 IV (12 B)
 MAC   = GCM 태그 16 B
 TC 마스크: FF FF FF FF FF        (Frame Length, Sequence Number 포함 전부 인증)
 TM 마스크: FF FF 00 FF FF FF     (MC Frame Count만 제외, 355.0 §4.2.2.6.2 d)
 ```
+
+AAD 길이는 TC 19 B(5 + 14), TM 20 B(6 + 14)입니다. 결과적으로 **TM MC Frame Count를 뺀 모든 헤더 바이트가 인증**됩니다. IV는 nonce로도 쓰이므로 AAD에 다시 넣어도 보안 강도는 같지만, 규칙을 "헤더 전체(마스크 제외)"로 단순하게 맞추기 위해 포함합니다.
 
 - TC 송신: Primary Header를 다 쓴 뒤(인증 대상) → SPI·IV 기록 → 데이터 암호화 → 태그 기록. 거절될 프레임은 IV를 소모하지 않습니다.
 - TM 수신: SPI·SA 상태 → ARSN 사전 검사 → 복호화·태그 검증 → **성공했을 때만** ARSN 기록. 실패한 프레임은 데이터 필드가 0으로 지워집니다.
